@@ -1,0 +1,179 @@
+---
+title: "Symbol Tables and the ISF Format"
+description: "How Volatility 3 uses ISF JSON symbol tables to define kernel types, resolve symbol addresses, and construct typed objects from raw memory."
+---
+
+Volatility 3 uses **symbol tables** to give structure to raw memory bytes. This page explains what symbol tables are, how they are stored in the Intermediate Symbol Format (ISF), and how the framework turns a bare memory offset into a typed Python object through templates and the symbol space.
+
+## What is a symbol table?
+
+Most compiled programs publish debugging information alongside their binaries — a catalogue of the types they define and the addresses those types live at. Volatility 3 calls each entry in this catalogue a **symbol**: a named address paired with an optional type template.
+
+Symbol tables group these symbols together and are typically produced per-module (e.g. one table for the Windows kernel, one for `ntdll.dll`). The framework reads them from its own JSON format so that the same tooling works whether the source data was a Windows PDB file, Linux DWARF data, or a hand-crafted type description.
+
+## The Intermediate Symbol Format (ISF)
+
+ISF is Volatility 3's JSON schema for symbol files. It serves as the common intermediary between:
+
+- **Windows PDB files** — automatically downloaded from Microsoft's symbol servers
+- **Linux DWARF data** — extracted from a kernel build with `dwarf2json`
+- **macOS symbol data** — similarly extracted from a kernel `dSYM` bundle
+
+An ISF file contains:
+
+- **Base types** — primitive types like `int`, `pointer`, `unsigned char` with their sizes
+- **User types (structs)** — named structures with member offsets and type references
+- **Enumerations** — named integer constants
+- **Symbols** — named addresses with optional associated type references
+- **Metadata** — producer, OS version, architecture, ISF schema version
+
+### File format and location
+
+ISF files are plain JSON and may be compressed:
+
+| Extension | Description |
+|-----------|-------------|
+| `.json` | Uncompressed ISF |
+| `.json.gz` | Gzip-compressed ISF |
+| `.json.xz` | XZ-compressed ISF |
+| `.zip` | ZIP archive containing one or more ISF files |
+
+Volatility 3 ships a small set of generic ISF files in `volatility3/symbols/generic/`. OS-specific symbol files are organised by operating system under the symbols path:
+
+```text
+volatility3/symbols/
+├── generic/         # Architecture-level types (e.g. native int sizes)
+├── windows/         # Windows PDB-derived ISF files
+├── linux/           # Linux DWARF-derived ISF files
+└── mac/             # macOS DWARF-derived ISF files
+```
+
+<Tip>User-supplied symbol files should be placed in the same directory hierarchy. Volatility 3 also maintains a cache at `~/.cache/volatility3` to index symbol files for fast lookup without scanning the full directory tree each run.</Tip>
+
+### Example ISF structure
+
+```json
+{
+  "metadata": {
+    "format": "6.2.0",
+    "producer": { "name": "dwarf2json", "version": "0.9.0" }
+  },
+  "base_types": {
+    "unsigned int": { "size": 4, "signed": false, "kind": "int", "endian": "little" }
+  },
+  "user_types": {
+    "task_struct": {
+      "size": 9536,
+      "members": {
+        "pid": { "offset": 2256, "type": { "kind": "base", "name": "int" } },
+        "comm": { "offset": 2288, "type": { "kind": "array", "count": 16,
+                   "subtype": { "kind": "base", "name": "char" } } }
+      }
+    }
+  },
+  "symbols": {
+    "init_task": { "address": 18446744072155528960, "type": { "kind": "struct", "name": "task_struct" } }
+  },
+  "enumerations": {}
+}
+```
+
+## SymbolSpace
+
+A `Context` holds exactly one `SymbolSpace`. The `SymbolSpace` is a collection of `SymbolTable` objects and provides unified lookup across all of them.
+
+```python
+# Add a symbol table to the context
+context.symbol_space.append(my_symbol_table)
+
+# Look up a type across all tables
+template = context.symbol_space.get_type("ntkrnlmp!_EPROCESS")
+
+# Look up a symbol address
+symbol = context.symbol_space.get_symbol("ntkrnlmp!PsActiveProcessHead")
+print(hex(symbol.address))
+```
+
+### The `module!symbol` naming convention
+
+Volatility 3 uses the standard `module!symbol` notation to uniquely identify symbols across multiple tables:
+
+```text
+ntkrnlmp!_EPROCESS       # Windows kernel type
+ntkrnlmp!PsLoadedModuleList  # Windows kernel symbol
+vmlinux!task_struct      # Linux kernel type
+```
+
+When you look up a name without a table prefix, the `SymbolSpace` searches all loaded tables in order. Providing the full `module!name` form is unambiguous and preferred when multiple tables might define the same name.
+
+## Templates and objects
+
+Understanding the distinction between templates and objects is central to how Volatility 3 works.
+
+### Templates
+
+A **template** is the schema for a type — its size, the names and offsets of its members, and the types of those members — without being bound to any data. Templates are obtained from a symbol table:
+
+```python
+# Get a template (no data, no layer, no offset)
+template = context.symbol_space.get_type("ntkrnlmp!_EPROCESS")
+print(template.size)           # size in bytes
+print(template.members.keys()) # member names
+```
+
+A template is analogous to a C `struct` definition. It describes the shape of the data but contains no actual values.
+
+### Objects
+
+An **object** is a template instantiated at a specific offset on a specific layer. Once constructed, Volatility 3 reads the data from the layer immediately and stores it internally. The data is **not re-read** on subsequent attribute access.
+
+```python
+# Construct an object on the kernel layer at a known offset
+proc = context.object(
+    object_type="ntkrnlmp!_EPROCESS",
+    layer_name="kernel",
+    offset=0xffff8000deadbeef,
+)
+
+# Access members — data was read at construction time
+print(proc.UniqueProcessId)
+print(proc.ImageFileName.cast("string"))
+
+# Follow a pointer to the next process
+next_proc = proc.ActiveProcessLinks.Flink.dereference().cast("_EPROCESS")
+```
+
+<Note>Because objects are read once at construction, you must re-construct an object if the underlying memory changes (relevant for live memory forensics). This is a deliberate trade-off: static memory analysis — the common case — benefits from consistent, predictable reads.</Note>
+
+### Native types vs structure types
+
+**Native types** (integers, pointers, arrays, booleans) are handled by a `NativeTable` that is architecture-specific. They define how raw bytes map to Python values — for example, a 64-bit little-endian unsigned pointer.
+
+**Structure types** (user types) are defined in ISF files and reference native types for their leaf members. The `SymbolTable` implementation resolves member types by composing user types with the native table.
+
+## OS-specific symbol paths
+
+| OS | ISF path | Source data |
+|----|----------|-------------|
+| Windows | `volatility3/symbols/windows/` | PDB files from Microsoft symbol servers |
+| Linux | `volatility3/symbols/linux/` | DWARF from kernel build via `dwarf2json` |
+| macOS | `volatility3/symbols/mac/` | DWARF from `dSYM` bundle via `dwarf2json` |
+
+Windows ISF files can often be generated automatically at runtime by the Windows automagic, which downloads the PDB from Microsoft and converts it. Linux and macOS ISF files must be generated from the specific kernel version in advance and placed in the appropriate path.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Framework architecture" icon="sitemap" href="/concepts/architecture">
+    How symbol tables and layers fit together in the context.
+  </Card>
+  <Card title="Memory layers" icon="layer-group" href="/concepts/memory-layers">
+    The layer abstraction that objects are constructed on top of.
+  </Card>
+  <Card title="Automagic" icon="wand-magic-sparkles" href="/concepts/automagic">
+    How automagic locates and loads the correct symbol table automatically.
+  </Card>
+  <Card title="Symbols API reference" icon="code" href="/developers/symbols-api">
+    Full API documentation for SymbolTable and SymbolSpace.
+  </Card>
+</CardGroup>

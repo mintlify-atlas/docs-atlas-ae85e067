@@ -1,0 +1,184 @@
+---
+title: "vol CLI: Running Volatility 3 Plugins from the Terminal"
+description: "Complete reference for the vol command-line interface: flags, plugin selection, output renderers, filtering, and config file overrides."
+---
+
+The `vol` command is the primary entry point to Volatility 3. It discovers available plugins, coordinates automagic to build memory layer stacks, and renders results to the terminal or a file. Every analysis session starts here.
+
+## Basic usage
+
+```text
+vol [global options] <plugin> [plugin options]
+```
+
+The plugin name can be a unique substring of the full dotted name. For example, `pslist` matches `windows.pslist.PsList` as long as that substring is unambiguous. If it matches more than one plugin, Volatility will ask you to be more specific.
+
+<Tip>
+  Run `vol --help` to list all discovered plugins. Run `vol <plugin> --help` to
+  see plugin-specific options.
+</Tip>
+
+## Specifying a memory image
+
+The most common flag in everyday use is `-f`, which accepts a local file path and converts it to the `file://` URL that Volatility uses internally.
+
+```bash
+vol -f /path/to/memory.raw windows.pslist
+```
+
+For remote images, or when you need full URL control, use `--single-location` directly:
+
+```bash
+vol --single-location file:///path/to/memory.raw windows.pslist
+vol --single-location https://example.com/images/sample.raw windows.pslist
+```
+
+## Global flags
+
+| Flag | Long form | Description |
+|------|-----------|-------------|
+| `-f FILE` | `--file FILE` | Shorthand for `--single-location=file://…`. Accepts a local file path. |
+| `-h` | `--help` | Show global help and the full plugin list. |
+| `-v` | `--verbosity` | Increase verbosity. Repeat up to six times (`-vvvvvv`). |
+| `-q` | `--quiet` | Suppress progress output. Useful when piping to a file or another tool. |
+| `-r RENDERER` | `--renderer RENDERER` | Output format: `quick` (default), `pretty`, `json`, `jsonl`, `csv`, `none`. |
+| `-o DIR` | `--output-dir DIR` | Directory for files written by plugins (e.g., `windows.dumpfiles`). Defaults to the current directory. |
+| `-p PATHS` | `--plugin-dirs PATHS` | Semicolon-separated list of extra plugin directories, searched before built-in paths. |
+| `-s PATHS` | `--symbol-dirs PATHS` | Semicolon-separated list of extra symbol directories or ZIP packs. |
+| `-l FILE` | `--log FILE` | Write all log output (including levels not shown on screen) to a file. |
+| `-c FILE` | `--config FILE` | Load configuration from a JSON file. |
+| `-e ITEM` | `--extend ITEM` | Extend or override a config item: `config.path.name=value`. |
+| | `--single-location URL` | Full URL of the memory image for automagic to build upon. |
+| | `--single-swap-locations` | Comma-separated swap files to include with the image. |
+| | `--parallelism [processes\|threads\|off]` | Enable experimental parallelism. Defaults to `processes` if the flag is given without a value. |
+| | `--offline` | Disable all online lookups (symbol server, remote ISF URLs). |
+| `-u URL` | `--remote-isf-url URL` | Override the default URL for remote ISF JSON lookups. Mutually exclusive with `--offline`. |
+| | `--save-config FILE` | Save the full resolved configuration to a JSON file after a run. |
+| | `--clear-cache` | Purge all short-term cached items. |
+| | `--cache-path PATH` | Override the default cache directory. |
+| | `--stackers` | Manually specify which layer stackers to use. |
+| | `--filters` | Filter output rows: `[+-]columnname,pattern[!]`. |
+| | `--hide-columns` | Space-separated column name prefixes to hide from output. |
+
+## Practical examples
+
+<Tabs>
+  <Tab title="Windows">
+    ```bash
+    # List processes
+    vol -f memory.raw windows.pslist
+
+    # Dump a suspicious process by PID
+    vol -f memory.raw -o /tmp/dumps windows.dumpfiles --pid 1234
+
+    # Run pslist quietly and save JSON output
+    vol -f memory.raw -q -r json windows.pslist > pslist.json
+
+    # List network connections with pretty alignment
+    vol -f memory.raw -r pretty windows.netstat
+    ```
+  </Tab>
+  <Tab title="Linux">
+    ```bash
+    # List processes
+    vol -f linux.raw linux.pslist
+
+    # Inspect loaded kernel modules
+    vol -f linux.raw linux.lsmod
+
+    # Enable full verbosity for debugging
+    vol -f linux.raw -vvvvvv linux.pslist
+
+    # Load additional symbol directory
+    vol -f linux.raw -s /opt/symbols linux.pslist
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    # List processes
+    vol -f mac.raw mac.pslist
+
+    # List kernel extensions
+    vol -f mac.raw mac.lsmod
+
+    # Use extra plugin directory for custom plugin
+    vol -f mac.raw -p /opt/myplugins mac.pslist
+    ```
+  </Tab>
+</Tabs>
+
+## Getting plugin help
+
+Every plugin accepts `-h` after the plugin name to show its specific options:
+
+```bash
+vol windows.dumpfiles -h
+```
+
+This prints which arguments the plugin accepts, their types, and whether they are required or optional.
+
+## Selecting an output format
+
+Use `-r` (or `--renderer`) to choose how results are displayed. The `json` and `jsonl` renderers write the version banner to stderr so stdout stays clean for piping:
+
+```bash
+# Tab-separated text (default)
+vol -f memory.raw -r quick windows.pslist
+
+# Column-aligned text (waits until the end to align widths)
+vol -f memory.raw -r pretty windows.pslist
+
+# JSON array
+vol -f memory.raw -r json windows.pslist
+
+# JSON Lines (one object per line)
+vol -f memory.raw -r jsonl windows.pslist
+
+# CSV
+vol -f memory.raw -r csv windows.pslist
+```
+
+See [Output formats and renderers](/using/output-formats) for a full breakdown of each format and the `--filters` and `--hide-columns` options.
+
+## Overriding defaults with a config file
+
+You can persist flag defaults in a JSON file so you do not need to type them every run.
+
+| Platform | Location |
+|----------|----------|
+| Windows | `%APPDATA%\volatility3\vol.json` |
+| Linux / macOS | `~/.config/volatility3/vol.json` |
+
+Example `vol.json` that sets a default output directory and disables online lookups:
+
+```json
+{
+  "output-dir": "/home/analyst/output",
+  "offline": true
+}
+```
+
+Override precedence (lowest to highest): built-in default → config file → command-line flag.
+
+<Warning>
+  Boolean flags set to `true` in the config file **cannot** be unset by omitting
+  the flag on the command line. Set them to `false` in the config file or remove
+  the key to restore the default.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Symbol tables" icon="table" href="/using/symbol-tables">
+    Set up Windows, Linux, and macOS symbol files so automagic can identify OS structures.
+  </Card>
+  <Card title="Output formats" icon="file-export" href="/using/output-formats">
+    Understand all renderers, format hints, and absent-value markers in plugin output.
+  </Card>
+  <Card title="Volshell" icon="terminal" href="/using/volshell">
+    Explore memory interactively without writing a full plugin.
+  </Card>
+  <Card title="Windows tutorial" icon="windows" href="/tutorials/windows">
+    Walk through a complete Windows memory analysis from image to results.
+  </Card>
+</CardGroup>

@@ -1,0 +1,306 @@
+---
+title: "Writing Your First Volatility 3 Plugin"
+description: "Step-by-step guide to building a Volatility 3 plugin: class structure, requirements, the run method, and how to install and execute your plugin."
+---
+
+Volatility 3 plugins are Python classes that query memory images and return structured output. This page walks you through every component you need to write a working plugin, using the `DllList` plugin from the Volatility source as a running example.
+
+## Prerequisites
+
+- Volatility 3 installed (see the [quickstart](/quickstart))
+- Python 3.8 or higher
+- Basic familiarity with Python classes
+
+## Plugin structure overview
+
+Every plugin is a Python class that:
+
+1. Inherits from `PluginInterface`
+2. Declares `_version` and `_required_framework_version`
+3. Implements `get_requirements()` as a classmethod
+4. Implements `run()`, which returns a `TreeGrid`
+5. Provides a generator that produces rows for the `TreeGrid`
+
+<Steps>
+
+<Step title="Inherit from PluginInterface">
+
+Create a new Python file and define a class that inherits from `volatility3.framework.interfaces.plugins.PluginInterface`. Volatility discovers plugins automatically by scanning plugin directories for subclasses of this interface.
+
+```python
+from volatility3.framework import interfaces, renderers, exceptions
+from volatility3.framework.configuration import requirements
+from volatility3.framework.renderers import format_hints
+from volatility3.plugins.windows import pslist
+
+
+class DllList(interfaces.plugins.PluginInterface):
+    """Lists the loaded modules in each running process."""
+```
+
+Place the file anywhere on `PYTHONPATH`, or inside a directory you pass with `--plugin-dirs`. Volatility scans those locations at startup and registers every `PluginInterface` subclass it finds.
+
+</Step>
+
+<Step title="Set version attributes">
+
+Two class-level version tuples control compatibility checks:
+
+```python
+class DllList(interfaces.plugins.PluginInterface):
+    """Lists the loaded modules in each running process."""
+
+    _version = (2, 0, 0)
+    _required_framework_version = (2, 0, 0)
+```
+
+Both tuples follow [Semantic Versioning](https://semver.org/) — `(major, minor, patch)`. The framework enforces that `_required_framework_version` is satisfied before your plugin runs: the installed framework's major version must match, and its minor version must be equal to or higher than what you require.
+
+`_version` advertises your plugin's own interface version so that other plugins can declare a `VersionRequirement` against it. Use the lowest framework version whose features you actually need, so your plugin works across the widest range of installations.
+
+</Step>
+
+<Step title="Implement get_requirements()">
+
+`get_requirements()` is a classmethod that returns a list of requirement objects. Each requirement becomes a configuration option that the framework — or the user — must satisfy before `run()` is called.
+
+```python
+    @classmethod
+    def get_requirements(cls):
+        return [
+            requirements.ModuleRequirement(
+                name="kernel",
+                description="Windows kernel",
+                architectures=["Intel32", "Intel64"],
+            ),
+            requirements.ListRequirement(
+                name="pid",
+                element_type=int,
+                description="Process IDs to include (all other processes are excluded)",
+                optional=True,
+            ),
+            requirements.VersionRequirement(
+                name="pslist",
+                component=pslist.PsList,
+                version=(2, 0, 0),
+            ),
+        ]
+```
+
+The three requirement types used here are:
+
+- **`ModuleRequirement`** — requests a kernel module (memory layer + symbol table). Volatility's automagic machinery fills this in automatically from the memory image. See [Plugin Requirements Reference](/developers/requirements) for the full list of requirement types.
+- **`ListRequirement`** — a user-supplied list of integers. Marking it `optional=True` means the plugin runs even if the user does not supply any PIDs.
+- **`VersionRequirement`** — a compatibility check asserting that `pslist.PsList` version 2.x is present. This requirement has no configuration value; it only blocks execution if the version check fails.
+
+Access requirement values inside `run()` via `self.config['requirement_name']`.
+
+<Note>
+`ModuleRequirement` is a *complex* requirement: users never set it directly. The automagic fills in the underlying `TranslationLayerRequirement` and `SymbolTableRequirement` sub-requirements automatically. Simple requirements like `ListRequirement` and `StringRequirement` are presented directly to the user.
+</Note>
+
+</Step>
+
+<Step title="Implement run()">
+
+`run()` takes no parameters (configuration arrives through `self.config`) and returns a `renderers.TreeGrid` that specifies the column schema and a data generator.
+
+```python
+    def run(self):
+        filter_func = pslist.PsList.create_pid_filter(
+            self.config.get("pid", None)
+        )
+
+        return renderers.TreeGrid(
+            [
+                ("PID", int),
+                ("Process", str),
+                ("Base", format_hints.Hex),
+                ("Size", format_hints.Hex),
+                ("Name", str),
+                ("Path", str),
+            ],
+            self._generator(
+                pslist.PsList.list_processes(
+                    context=self.context,
+                    kernel_module_name=self.config["kernel"],
+                    filter_func=filter_func,
+                )
+            ),
+        )
+```
+
+The first argument to `TreeGrid` is a list of `(column_name, type)` tuples. Types must be simple Python types (`int`, `str`, `bytes`, `float`, `bool`) or a `format_hints` wrapper (such as `format_hints.Hex`) that tells renderers how to display a value without changing the underlying type.
+
+The second argument is a generator that yields rows. Here `pslist.PsList.list_processes` is a classmethod on another plugin — a common Volatility pattern that lets plugins share code without coupling their configurations.
+
+</Step>
+
+<Step title="Define the generator">
+
+The generator does the actual memory analysis. It yields one tuple per row: `(depth, (col1_value, col2_value, ...))`. The depth integer controls tree indentation — use `0` for flat output.
+
+```python
+    def _generator(self, procs):
+        for proc in procs:
+            for entry in proc.load_order_modules():
+                BaseDllName = FullDllName = renderers.UnreadableValue()
+                try:
+                    BaseDllName = entry.BaseDllName.get_string()
+                    FullDllName = entry.FullDllName.get_string()
+                except exceptions.InvalidAddressException:
+                    pass
+
+                yield (
+                    0,
+                    (
+                        proc.UniqueProcessId,
+                        proc.ImageFileName.cast(
+                            "string",
+                            max_length=proc.ImageFileName.vol.count,
+                            errors="replace",
+                        ),
+                        format_hints.Hex(entry.DllBase),
+                        format_hints.Hex(entry.SizeOfImage),
+                        BaseDllName,
+                        FullDllName,
+                    ),
+                )
+```
+
+Key patterns here:
+
+- **Default to `UnreadableValue()`** before reading — if the memory read fails, the column contains a meaningful placeholder rather than crashing.
+- **Catch `InvalidAddressException`** around any memory read that might fail. Other non-fatal exceptions should be caught at the appropriate level too.
+- **Use `.cast()`** when the symbol type doesn't match the column type. `ImageFileName.cast("string", ...)` converts the raw character array to a Python `str`.
+- **Wrap addresses in `format_hints.Hex()`** so renderers can display them in hexadecimal.
+
+</Step>
+
+</Steps>
+
+## Complete example
+
+Below is the full plugin in one block, with all necessary imports:
+
+```python
+from typing import List
+
+from volatility3.framework import interfaces, renderers, exceptions
+from volatility3.framework.configuration import requirements
+from volatility3.framework.renderers import format_hints
+from volatility3.plugins.windows import pslist
+
+
+class DllList(interfaces.plugins.PluginInterface):
+    """Lists the loaded modules in each running process."""
+
+    _version = (2, 0, 0)
+    _required_framework_version = (2, 0, 0)
+
+    @classmethod
+    def get_requirements(cls) -> List[interfaces.configuration.RequirementInterface]:
+        return [
+            requirements.ModuleRequirement(
+                name="kernel",
+                description="Windows kernel",
+                architectures=["Intel32", "Intel64"],
+            ),
+            requirements.ListRequirement(
+                name="pid",
+                element_type=int,
+                description="Process IDs to include (all other processes are excluded)",
+                optional=True,
+            ),
+            requirements.VersionRequirement(
+                name="pslist",
+                component=pslist.PsList,
+                version=(2, 0, 0),
+            ),
+        ]
+
+    def _generator(self, procs):
+        for proc in procs:
+            for entry in proc.load_order_modules():
+                BaseDllName = FullDllName = renderers.UnreadableValue()
+                try:
+                    BaseDllName = entry.BaseDllName.get_string()
+                    FullDllName = entry.FullDllName.get_string()
+                except exceptions.InvalidAddressException:
+                    pass
+
+                yield (
+                    0,
+                    (
+                        proc.UniqueProcessId,
+                        proc.ImageFileName.cast(
+                            "string",
+                            max_length=proc.ImageFileName.vol.count,
+                            errors="replace",
+                        ),
+                        format_hints.Hex(entry.DllBase),
+                        format_hints.Hex(entry.SizeOfImage),
+                        BaseDllName,
+                        FullDllName,
+                    ),
+                )
+
+    def run(self):
+        filter_func = pslist.PsList.create_pid_filter(
+            self.config.get("pid", None)
+        )
+        return renderers.TreeGrid(
+            [
+                ("PID", int),
+                ("Process", str),
+                ("Base", format_hints.Hex),
+                ("Size", format_hints.Hex),
+                ("Name", str),
+                ("Path", str),
+            ],
+            self._generator(
+                pslist.PsList.list_processes(
+                    context=self.context,
+                    kernel_module_name=self.config["kernel"],
+                    filter_func=filter_func,
+                )
+            ),
+        )
+```
+
+## Installing and running your plugin
+
+<Tabs>
+  <Tab title="Plugin directory">
+    Pass the directory that contains your plugin file using `--plugin-dirs`:
+
+    ```bash
+    vol --plugin-dirs /path/to/myplugins -f memory.img windows.dlllist.DllList
+    ```
+  </Tab>
+  <Tab title="PYTHONPATH">
+    Add the parent of your plugin package to `PYTHONPATH` and Volatility will discover it automatically:
+
+    ```bash
+    export PYTHONPATH=/path/to/myplugins:$PYTHONPATH
+    vol -f memory.img myplugins.dlllist.DllList
+    ```
+  </Tab>
+</Tabs>
+
+The plugin name on the command line mirrors the Python module path relative to the plugin search path. A class `DllList` in `volatility3/plugins/windows/dlllist.py` is invoked as `windows.dlllist.DllList`.
+
+<Tip>
+Run `vol --help` to see all discovered plugins and confirm your plugin appears in the list.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Advanced plugin patterns" icon="puzzle-piece" href="/developers/plugin-advanced">
+    File output, progress callbacks, nested TreeGrid rows, and calling other plugins.
+  </Card>
+  <Card title="Requirements reference" icon="list" href="/developers/requirements">
+    Full reference for every requirement type and its parameters.
+  </Card>
+</CardGroup>

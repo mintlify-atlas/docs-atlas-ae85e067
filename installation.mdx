@@ -1,0 +1,181 @@
+---
+title: "Install Volatility 3: pip, Source, and Symbol Tables"
+description: "Install Volatility 3 via pip for stable use, or clone the repository to work with the latest development version. Requires Python 3.8 or later."
+---
+
+Volatility 3 is a Python package that runs on any platform with Python 3.8 or later. This page covers the stable pip install, the development install from source, optional dependencies that unlock additional plugins, and how to install symbol table packs for offline analysis.
+
+## Requirements
+
+- Python 3.8.0 or later
+- pip
+
+<Tip>
+Use a virtual environment to keep Volatility 3's dependencies isolated from your system Python packages.
+</Tip>
+
+## Install Volatility 3
+
+<Steps>
+  <Step title="Install from PyPI (stable)">
+    The stable release is published on the [PyPI registry](https://pypi.org/project/volatility3):
+
+    ```bash
+    pip install volatility3
+    ```
+
+    After installation, the `vol` and `volshell` commands are available in your `PATH`.
+
+    ```bash
+    vol --help
+    ```
+  </Step>
+
+  <Step title="Verify the installation">
+    Confirm that Volatility 3 is installed correctly by listing available plugins:
+
+    ```bash
+    vol --help
+    ```
+
+    You should see a list of available plugins and global options.
+  </Step>
+</Steps>
+
+## Install from source (development)
+
+Use the development install if you want the latest changes from the `develop` branch or if you plan to write and test plugins.
+
+<Steps>
+  <Step title="Clone the repository">
+    The `stable` branch always tracks the latest stable release. The default branch is `develop`.
+
+    ```bash
+    git clone https://github.com/volatilityfoundation/volatility3.git
+    cd volatility3
+    ```
+  </Step>
+
+  <Step title="Create a virtual environment">
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate
+    ```
+
+    On Windows, activate with:
+
+    ```bat
+    venv\Scripts\activate
+    ```
+  </Step>
+
+  <Step title="Install in editable mode">
+    ```bash
+    pip install -e ".[dev]"
+    ```
+
+    The `dev` extra includes all optional dependencies plus testing and build tools.
+  </Step>
+</Steps>
+
+## Optional dependencies
+
+The base install includes only the core framework. Install extras to enable additional plugins and capabilities.
+
+<CodeGroup>
+
+```bash Full extras
+pip install "volatility3[full]"
+```
+
+```bash Cloud storage extras
+pip install "volatility3[cloud]"
+```
+
+```bash Full and cloud
+pip install "volatility3[full,cloud]"
+```
+
+</CodeGroup>
+
+| Extra | Packages included | What it enables |
+|-------|------------------|-----------------|
+| `full` | `yara-python`, `capstone`, `pycryptodome`, `leechcorepyc`, `pillow` | YARA scanning, disassembly, crypto operations, live memory acquisition, image extraction |
+| `cloud` | `gcsfs`, `s3fs` | Reading memory images directly from Google Cloud Storage or Amazon S3 |
+
+<Note>
+`leechcorepyc` is not available on macOS and is automatically excluded on that platform.
+</Note>
+
+## Install symbol tables
+
+Symbol tables describe the data structures of a specific OS kernel version. Without them, Volatility 3 cannot parse OS structures in memory images.
+
+**Windows:** Symbol tables are generated automatically from Microsoft's public PDB symbol server on first use. No manual download is required.
+
+**Linux and macOS:** You must provide symbol tables manually. Pre-built packs are available for download:
+
+<Steps>
+  <Step title="Download the symbol table pack for your OS">
+    <CodeGroup>
+
+    ```bash Windows
+    curl -LO https://github.com/volatilityfoundation/volatility3-test-data/releases/download/v0.0.1/windows.zip
+    ```
+
+    ```bash macOS
+    curl -LO https://github.com/volatilityfoundation/volatility3-test-data/releases/download/v0.0.1/mac.zip
+    ```
+
+    ```bash Linux
+    curl -LO https://github.com/volatilityfoundation/volatility3-test-data/releases/download/v0.0.1/linux.zip
+    ```
+
+    </CodeGroup>
+
+    Verify the download using the published checksums:
+
+    ```bash
+    # SHA256 hashes
+    curl -LO https://raw.githubusercontent.com/volatilityfoundation/volatility3-test-data/refs/tags/v0.0.1/symbols/SHA256SUMS
+    sha256sum --check SHA256SUMS
+    ```
+  </Step>
+
+  <Step title="Place the zip file in the symbols directory">
+    Place the downloaded zip file — as named — into the `volatility3/symbols` directory next to the installed package, or next to the `vol` executable:
+
+    ```
+    volatility3/
+    └── symbols/
+        ├── windows.zip
+        ├── mac.zip
+        └── linux.zip
+    ```
+
+    Do not extract the zip files. Volatility 3 reads them directly.
+  </Step>
+
+  <Step title="Wait for the cache to build on first run">
+    The first run after adding new symbol files rebuilds the internal cache. This can take several minutes for large packs but only happens once per symbol file location.
+
+    <Warning>
+    The cache build can be interrupted and will resume on the next run. Do not be alarmed if the first run appears to hang briefly.
+    </Warning>
+  </Step>
+</Steps>
+
+<Note>
+The pre-built Windows and macOS packs cover all kernel versions up to the point of creation. Linux symbol tables must often be generated manually from the specific kernel you are analyzing using [dwarf2json](https://github.com/volatilityfoundation/dwarf2json), or sourced from the community repository [volatility3-symbols](https://github.com/Abyss-W4tcher/volatility3-symbols).
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first analysis against a memory image.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/concepts/symbol-tables">
+    Learn how ISF symbol tables work and how to generate them for Linux and macOS.
+  </Card>
+</CardGroup>

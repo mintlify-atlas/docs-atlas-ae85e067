@@ -1,0 +1,181 @@
+---
+title: "Memory Layers: How Volatility Reads RAM"
+description: "How Volatility 3 models memory as a directed acyclic graph of DataLayers and TranslationLayers for physical and virtual address translation."
+---
+
+Volatility 3 represents every source of memory data as a **layer** — a named, addressable body of bytes. This page explains what layers are, how virtual-to-physical address translation works, which file formats are supported, and how to read from and scan a layer programmatically.
+
+## What is a memory layer?
+
+A memory layer is any object that exposes a contiguous (or sparse) address space from which bytes can be read at a given offset. At the lowest level this is a physical medium — a RAM dump saved to disk. At higher levels, layers translate addresses: a virtual address visible to a running process maps through one or more page tables to reach the physical bytes.
+
+Volatility 3 models this as a **directed acyclic graph (DAG)** of layers:
+
+- **Leaf nodes** are `DataLayer` objects. They hold raw bytes and do not depend on any other layer.
+- **Internal nodes** are `TranslationLayer` objects. They depend on one or more lower layers and translate incoming addresses before delegating reads.
+
+```text
+Intel32eLayer  (TranslationLayer — virtual addresses)
+      │
+      ▼
+LiMELayer      (TranslationLayer — LiME file format)
+      │
+      ▼
+FileLayer      (DataLayer — raw file bytes on disk)
+```
+
+<Note>Volatility 2 used "address spaces" that could only stack linearly. The DAG model in Volatility 3 lets a single virtual layer combine a physical image and a page file simultaneously.</Note>
+
+## Virtual vs physical addressing
+
+Modern operating systems use **paged memory**: available RAM is divided into fixed-size pages (typically 4 KB). Each process has its own page table that maps its virtual addresses to physical addresses. The kernel's page tables map a portion of the same physical memory, which is why kernel addresses appear consistently across all processes.
+
+The worked example below shows three separate address maps sharing the same physical memory:
+
+```text
+OS map                          Physical Memory
+1 -> 9                          1  - free
+2 -> 3                          2  - OS.4, Process1.4, Process2.4
+3 -> 7                          3  - OS.2
+4 -> 2                          6  - Process1.2, Process2.3
+                                7  - OS.3
+Process 1 map                   8  - Process1.3
+1 -> 12                         9  - OS.1
+2 -> 6                          10 - Process2.1
+3 -> 8                          12 - Process1.1
+4 -> 2                          15 - Process2.2
+
+Process 2 map
+1 -> 10
+2 -> 15
+3 -> 6
+4 -> 2
+```
+
+Virtual address `2` in Process 1 and virtual address `3` in Process 2 both map to physical address `6` — they share the same physical page. This sharing is a common pattern in shared libraries.
+
+## Layer types
+
+### DataLayerInterface
+
+`DataLayerInterface` is the base class for all leaf nodes. It directly reads bytes from a data source without further translation. Its two key abstract methods are:
+
+```python
+def read(self, offset: int, length: int, pad: bool = False) -> bytes: ...
+def write(self, offset: int, data: bytes) -> None: ...
+```
+
+`read()` raises `InvalidAddressException` on an unmapped region unless `pad=True`, in which case missing bytes are replaced with null bytes (`\x00`).
+
+### TranslationLayerInterface
+
+`TranslationLayerInterface` extends `DataLayerInterface` with the `mapping()` method:
+
+```python
+def mapping(
+    self,
+    offset: int,
+    length: int,
+    ignore_errors: bool = False,
+) -> Iterable[Tuple[int, int, int, int, str]]: ...
+```
+
+Each yielded tuple is `(offset, sublength, mapped_offset, mapped_length, layer_name)` — one contiguous chunk of the requested range after translation. If a portion cannot be mapped and `ignore_errors` is `False`, an exception is raised. Setting `ignore_errors=True` skips unmappable regions and returns the available chunks.
+
+`TranslationLayer.read()` calls `mapping()` internally, so you can call `read()` on any layer — physical or virtual — and the translation is handled automatically.
+
+## Supported formats
+
+The table below lists the file formats and memory sources that Volatility 3 can load as layers. Run the `frameworkinfo` plugin to see the full list available in your installed version.
+
+| Format | Layer class | Notes |
+|--------|-------------|-------|
+| Raw / padded | `FileLayer` | Flat binary dumps, no header |
+| LiME | `LimeLayer` | Linux Memory Extractor format |
+| VMware | `VmwareLayer` | `.vmem`, `.vmss`, `.vmsn` snapshot files |
+| AVML | `AvmlLayer` | Azure VM memory capture |
+| Windows crash dump | `WindowsCrashDump32/64Layer` | BSOD-style `.dmp` files |
+| ELF core | `ElfLayer` | Linux `/proc/vmcore`, hypervisor ELF dumps |
+| Xen | `XenLayer` | Xen hypervisor memory saves |
+| QEMU | `QemuSuspendLayer` | QEMU suspend-to-disk images |
+| MSF | `MsfLayer` | Microsoft crash dump variant |
+
+<Note>Page file support is possible by stacking a swap layer alongside the physical image layer. When the Intel translation layer encounters a not-present page, it checks whether a swap layer satisfies the address before raising an exception.</Note>
+
+## Reading from a layer
+
+Retrieve a layer from the context by name and call `read()`:
+
+```python
+# Read 8 bytes at offset 0x1000 from the kernel virtual layer
+data = context.layers["kernel"].read(0x1000, 8)
+
+# Read with null-padding on page faults
+data = context.layers["kernel"].read(0x1000, 8, pad=True)
+```
+
+To inspect how a range of virtual addresses maps to physical addresses, use `mapping()`:
+
+```python
+for offset, sublength, mapped_offset, mapped_length, layer in \
+        context.layers["kernel"].mapping(0xffff800000000000, 0x1000):
+    print(f"virtual {offset:#x} → {layer}:{mapped_offset:#x} ({sublength} bytes)")
+```
+
+## Scanning layers
+
+`ScannerInterface` provides an efficient, chunked scanning mechanism for locating patterns across an entire layer. Scanners receive overlapping chunks of bytes in ascending offset order and yield match offsets.
+
+```python
+from volatility3.framework.interfaces.layers import ScannerInterface
+
+class MagicScanner(ScannerInterface):
+    def __call__(self, data: bytes, data_offset: int):
+        needle = b"\x4d\x5a"  # MZ header
+        pos = 0
+        while True:
+            pos = data.find(needle, pos)
+            if pos == -1 or pos >= self.chunk_size:
+                break
+            yield data_offset + pos
+            pos += 1
+
+for offset in context.layers["kernel"].scan(context, MagicScanner()):
+    print(f"Found MZ at {offset:#x}")
+```
+
+<Tip>Mark your scanner `thread_safe = True` if it holds no mutable state. Volatility 3 will then parallelise the scan across multiple chunks automatically.</Tip>
+
+## Layer names and the layer container
+
+Layers are registered in `context.layers` under string names. Automagic and layer stacking routines use `context.layers.free_layer_name(prefix)` to generate collision-free names.
+
+```python
+# Add a layer manually
+context.layers.add_layer(my_layer)
+
+# Look up an existing layer
+layer = context.layers["kernel"]
+
+# Generate a unique name with a prefix
+name = context.layers.free_layer_name("IntelLayer")  # e.g. "IntelLayer_1"
+```
+
+Attempting to add a `TranslationLayer` whose dependencies are not yet in the container raises a `LayerException`.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Framework architecture" icon="sitemap" href="/concepts/architecture">
+    See how layers fit into the broader context, symbol tables, and plugin model.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/concepts/symbol-tables">
+    Once you can address memory, learn how to interpret its structure with symbol tables.
+  </Card>
+  <Card title="Automagic" icon="wand-magic-sparkles" href="/concepts/automagic">
+    How automagic detects the image format and stacks layers automatically.
+  </Card>
+  <Card title="Layers API reference" icon="code" href="/developers/layers-api">
+    Full API documentation for the layer interfaces.
+  </Card>
+</CardGroup>

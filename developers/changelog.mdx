@@ -1,0 +1,240 @@
+---
+title: "Volatility 3 Framework API Changelog and Version History"
+description: "A full history of Volatility 3 API changes by version, with notes on breaking changes, additions, and how to declare framework version requirements."
+---
+
+Volatility 3 tracks API changes through a semantic version number that increments whenever the public framework interface changes. This page lists every recorded API change by version so plugin authors can identify which version they depend on and how to declare that dependency correctly.
+
+## Versioning scheme
+
+Volatility 3 follows [Semantic Versioning](https://semver.org/):
+
+| Bump | Meaning | Example trigger |
+|---|---|---|
+| **Major** | Breaking change — callers may need updates | Removing a method, changing a signature incompatibly |
+| **Minor** | Backward-compatible addition | Adding a new method, constant, or class |
+| **Patch** | Internal fix, no interface change | Bug fix that does not alter inputs or outputs |
+
+### Declaring version requirements in plugins
+
+Every plugin should declare two version attributes:
+
+```python
+class MyPlugin(interfaces.plugins.PluginInterface):
+    # Minimum framework version this plugin requires.
+    # Volatility refuses to run the plugin if the major version does not match.
+    _required_framework_version = (2, 0, 0)
+
+    # This plugin's own SemVer interface version.
+    # Other plugins that depend on this one check this tuple.
+    _version = (1, 0, 0)
+```
+
+<Warning>
+  If `_required_framework_version` major does not match the running framework
+  major, Volatility will refuse to load the plugin. Always update this tuple
+  when porting a plugin to a new major API version.
+</Warning>
+
+## API changes by version
+
+<AccordionGroup>
+  <Accordion title="2.25.0">
+    **`Pointer` class**
+    - Added `get_raw_value()` method to read the raw pointer value without dereferencing or applying any fixups.
+
+    **`KTIMER` structure**
+    - Removed `get_raw_dpc()`. Code that called this method must be updated.
+
+    <Warning>
+      `KTIMER.get_raw_dpc()` removal is a breaking change for any plugin that
+      called it directly. This is a major-version bump trigger; bump your
+      `_required_framework_version` to `(2, 0, 0)` or higher.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="2.24.0">
+    **`objects.utility.array_to_string`**
+    - Added optional `encoding` parameter to control the string encoding used when converting a memory array to a Python string. Defaults to the previous behaviour.
+  </Accordion>
+
+  <Accordion title="2.23.0">
+    **Windows GUI support**
+    - Added support for Windows GUI classes and OS distinguishers, enabling analysis of graphical subsystem structures.
+
+    **`ExecutiveObject.get_object_header()`**
+    - Added a `symbol_table_name` parameter so callers can specify which symbol table to use when resolving the object header type.
+  </Accordion>
+
+  <Accordion title="2.22.0">
+    **Linux networking**
+    - Added Linux network constants.
+    - Moved network objects to a separate versionable module. Plugins that imported them from the previous location must update their import paths.
+  </Accordion>
+
+  <Accordion title="2.21.0">
+    **`linux.extensions`**
+    - Added a `uuid` method to Linux extensions for reading UUID values from kernel structures.
+  </Accordion>
+
+  <Accordion title="2.20.0">
+    **Linux constants**
+    - Added `NM_TYPES_DESC` constants for Linux network manager type descriptions.
+
+    **`linux.extensions`**
+    - Added `latch_tree_root` and `kernel_symbol` to Linux extensions.
+
+    **`linux.extensions.module`**
+    - Added `get_module_address_boundaries` — returns the start and end addresses of a loaded kernel module.
+    - Added `section_typetab` — accesses the module's section type table.
+
+    **`linux.extensions.task_struct`**
+    - Added `get_address_space_layer` — retrieves the memory layer for a task's address space.
+    - Added `state` — reads the task's current scheduler state.
+
+    **`linux.extensions.bpf_prog`**
+    - Added `bpf_jit_binary_hdr_address` — returns the address of the JIT-compiled BPF program binary header.
+  </Accordion>
+
+  <Accordion title="2.19.0">
+    **`Modules` versionable module (Linux)**
+    - Introduced a dedicated `Modules` versionable extension module for Linux, providing a stable interface for kernel module enumeration.
+
+    **`LinuxUtilities` deprecations**
+    - Several `LinuxUtilities` functions related to module handling are deprecated. Migrate to the new `Modules` module.
+  </Accordion>
+
+  <Accordion title="2.18.0">
+    **`linux.extensions`**
+    - Added the `scatterlist` extension for working with Linux scatter-gather list structures.
+  </Accordion>
+
+  <Accordion title="2.17.0">
+    **`SymbolInterface`**
+    - Added a `types` member to `SymbolInterface`, allowing consumers to enumerate the types available in a symbol table.
+  </Accordion>
+
+  <Accordion title="2.16.0">
+    **Linux taint flags**
+    - Added `TAINT_FLAG` constants and the `TaintFlag` dataclass for representing kernel taint state.
+    - Added the `linux.tainting` versionable module for querying kernel taint flags.
+  </Accordion>
+
+  <Accordion title="2.15.0">
+    **`LinuxUtilities`**
+    - Added `convert_fourcc_code` for converting four-character codes used in Linux filesystems and media subsystems.
+  </Accordion>
+
+  <Accordion title="2.14.0">
+    No significant API changes. (Part of the 2.16.0 development branch that took extra time to land.)
+  </Accordion>
+
+  <Accordion title="2.13.0">
+    **Linux `task` object**
+    - Added `getppid` method to return the parent process ID of a Linux task.
+  </Accordion>
+
+  <Accordion title="2.12.0">
+    **Intel translation layer**
+    - Updated the Intel layer to support `PROT_NONE` pages (pages that are mapped but have no read/write/execute permissions). Scanning and address translation now handle these pages correctly.
+  </Accordion>
+
+  <Accordion title="2.11.0">
+    **Windows registry**
+    - Added `get_type` method to the `CM_KEY_NODE` structure for reading the type of a registry key node.
+  </Accordion>
+
+  <Accordion title="2.10.0">
+    No significant API changes. (CLI changes to the JSONL text renderer only — no public API surface affected.)
+  </Accordion>
+
+  <Accordion title="2.9.0">
+    No significant API changes. (Internal change to call `linux.LinuxUtilities.get_module_from_volobj_type` to resolve the kernel module — no public API surface affected.)
+  </Accordion>
+
+  <Accordion title="2.8.0">
+    **Renderers**
+    - Added `BinOrAbsent`, `HexOrAbsent`, `HexBytesOrAbsent`, and `MultiTypeDataOrAbsent` data type renderers. These render a value in the specified format if present, or a configurable absent-value marker if the data could not be read.
+  </Accordion>
+
+  <Accordion title="2.7.0">
+    **`ETHREAD` structure (Windows)**
+    - Added `is_valid` — returns whether the thread object passes basic validity checks.
+    - Added `get_create_time` — returns the thread creation timestamp.
+    - Added `get_exit_time` — returns the thread exit timestamp (if the thread has exited).
+  </Accordion>
+
+  <Accordion title="2.6.0">
+    No significant changes. (Version bumped twice during the pull request process; the intended changes landed in 2.7.0.)
+  </Accordion>
+
+  <Accordion title="2.5.0">
+    **`object_from_symbol`**
+    - Added support for specifying a type override when calling `object_from_symbol`, allowing callers to interpret a symbol as a type other than the one recorded in the symbol table.
+  </Accordion>
+
+  <Accordion title="2.4.0">
+    **Windows VAD structures**
+    - Added `get_size()` method to Windows VAD (Virtual Address Descriptor) structures.
+    - Fixed several off-by-one errors in VAD size calculations.
+  </Accordion>
+
+  <Accordion title="2.3.1">
+    **`_EPROCESS.owning_process` (Windows)**
+    - Updated the method to correctly handle Windows Vista and later versions, where the structure layout differs from earlier releases.
+  </Accordion>
+
+  <Accordion title="2.3.0">
+    **Template class**
+    - Added `child_template` to the template class, enabling templates to reference child templates for nested structure traversal.
+  </Accordion>
+
+  <Accordion title="2.2.0">
+    **Linux core**
+    - Changes to Linux core calls. See the commit history for details.
+  </Accordion>
+
+  <Accordion title="2.1.0">
+    **Linux `task`**
+    - Added `get_threads` method to the Linux `task` object, returning an iterator over all threads belonging to the task.
+  </Accordion>
+
+  <Accordion title="2.0.3">
+    **Windows device and driver objects**
+    - Added `DEVICE_OBJECT.get_attached_devices` — returns all devices attached to a given device object.
+    - Added `DRIVER_OBJECT.get_devices` — returns all devices owned by a driver object.
+  </Accordion>
+
+  <Accordion title="2.0.2">
+    **PDB scanner**
+    - Fixed the offsets returned by the PDB scanner. Previously, offsets were reported relative to an incorrect base; they are now consistent with the values used elsewhere in the framework.
+  </Accordion>
+
+  <Accordion title="2.0.0">
+    **Symbol shift mechanism removed (breaking)**
+
+    Removed the `symbol_shift` mechanism. Previously, a symbol table could apply its own shift to the symbols it reported. This made it ambiguous whether a symbol value was an absolute address or one that still needed shifting.
+
+    From 2.0.0 onwards:
+    - Symbols from a symbol table are always raw offset values (unshifted).
+    - To get an absolute address, add the symbol to a `Module`'s base offset.
+    - Use `Module.get_absolute_symbol_address` for a one-step helper.
+    - `Module.object_from_symbol(absolute=False, ...)` handles the shift internally.
+
+    ```python
+    # Before 2.0.0 (implicit shift, ambiguous)
+    addr = symbol_table.get_symbol("PsActiveProcessHead").address
+
+    # From 2.0.0 (explicit, unambiguous)
+    addr = kernel_module.get_absolute_symbol_address("PsActiveProcessHead")
+    ```
+  </Accordion>
+
+  <Accordion title="1.2.0">
+    **Module collections**
+    - Added support for module collections.
+    - Added `context.modules` — a collection of loaded modules accessible by name.
+    - Added `ModuleRequirement` — a plugin requirement that resolves to a named module in the context.
+    - Added `get_symbols_by_absolute_location` — look up symbols in a module by their absolute (shifted) address.
+  </Accordion>
+</AccordionGroup>

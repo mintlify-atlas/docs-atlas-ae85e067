@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Volatility 3",
+  "projectType": "framework",
+  "projectName": "Volatility 3",
+  "projectDescription": "The world's most widely used open-source memory forensics framework for extracting digital artifacts from volatile memory (RAM) samples.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#7c847c",
-    "light": "#110d0d",
-    "dark": "#d9bdbd"
-  },
-  "favicon": "https://media.brand.dev/78a43fa2-eb58-43da-8fc2-7cd75fb6269c.jpg",
-  "logo": {
-    "light": "https://media.brand.dev/058f5ce5-56c7-4004-ac51-6f5fafaddd1e.png",
-    "dark": "https://media.brand.dev/058f5ce5-56c7-4004-ac51-6f5fafaddd1e.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/volatilityfoundation/volatility3"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/volatilityfoundation/volatility3"
-    }
-  },
+  "primaryColor": "#7c847c",
+  "lightColor": "#110d0d",
+  "darkColor": "#d9bdbd",
   "navigation": {
     "tabs": [
       {
@@ -102,5 +85,33 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Plugin-based architecture for extensible memory analysis",
+    "Cross-platform support for Windows, Linux, and macOS memory images",
+    "Automatic symbol table discovery and generation (Automagic)",
+    "Layered memory abstraction supporting LIME, VMware, AVML, crash dumps, and more",
+    "JSON-based symbol tables (ISF) compatible with Windows PDB and Linux DWARF",
+    "Interactive memory exploration via Volshell",
+    "Usable both as a CLI tool and as a Python library",
+    "Built-in renderers for text, CSV, JSON, SQLite, and custom output formats"
+  ],
+  "publicApiSurface": [
+    "volatility3.framework.interfaces.plugins.PluginInterface",
+    "volatility3.framework.interfaces.layers.TranslationLayerInterface",
+    "volatility3.framework.interfaces.layers.DataLayerInterface",
+    "volatility3.framework.interfaces.symbols.SymbolTableInterface",
+    "volatility3.framework.interfaces.context.ContextInterface",
+    "volatility3.framework.interfaces.automagic.AutomagicInterface",
+    "volatility3.framework.interfaces.renderers.TreeGrid",
+    "volatility3.framework.contexts.Context",
+    "volatility3.framework.automagic.run()",
+    "volatility3.framework.automagic.available()",
+    "volatility3.framework.plugins.construct_plugin()",
+    "volatility3.framework.require_interface_version()",
+    "volatility3.framework.list_plugins()",
+    "volatility3.framework.import_files()",
+    "vol CLI (vol -f <image> <plugin>)",
+    "volshell CLI (volshell -f <image> [-w|-l|-m])"
+  ]
 }

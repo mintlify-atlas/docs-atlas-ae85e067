@@ -1,0 +1,326 @@
+---
+title: "Layers API: Memory Layer Interfaces in Volatility 3"
+description: "Reference for Volatility 3's layer interfaces — DataLayerInterface, TranslationLayerInterface, ScannerInterface, and built-in layer implementations."
+---
+
+The Volatility 3 layers API defines how memory is modelled, addressed, and traversed. Every source of data — a raw image file, a LiME dump, an Intel virtual address space — is represented as a layer. This page covers the core interfaces in `volatility3.framework.interfaces.layers`, explains the class hierarchy, documents key methods, and shows how to work with layers inside a context.
+
+## Class hierarchy
+
+Layers form a directed acyclic graph. Leaf nodes hold raw bytes. Internal nodes translate addresses from one space to another.
+
+<CardGroup cols={2}>
+  <Card title="DataLayerInterface" icon="database">
+    A leaf-node layer that directly holds or streams raw bytes. It exposes `read()`, `write()`, `is_valid()`, and `scan()`. No address translation occurs inside this class.
+  </Card>
+  <Card title="TranslationLayerInterface" icon="arrows-left-right">
+    Extends `DataLayerInterface` to add address translation. It implements `mapping()` to convert virtual offsets to physical offsets in a lower layer, and overrides `read()`/`write()` to walk that mapping automatically.
+  </Card>
+</CardGroup>
+
+<Note>
+`TranslationLayerInterface` inherits from `DataLayerInterface`, so every translation layer also exposes `read()`, `write()`, `is_valid()`, and `scan()`. You rarely need to call `mapping()` directly unless you are writing a scanner or a new layer type.
+</Note>
+
+`ScannerInterface` is a separate, independent class used to search layer data efficiently in overlapping chunks.
+
+## DataLayerInterface
+
+Defined in `volatility3/framework/interfaces/layers.py`, `DataLayerInterface` is the base class for all layers that own data directly.
+
+### Core methods
+
+<ParamField path="read" type="method">
+  Read bytes from the layer.
+
+  <ParamField path="offset" type="int" required>
+    The address within the layer at which to start reading.
+  </ParamField>
+  <ParamField path="length" type="int" required>
+    Number of bytes to read.
+  </ParamField>
+  <ParamField path="pad" type="bool" default="False">
+    When `True`, unreadable bytes are replaced with null bytes instead of raising an exception.
+  </ParamField>
+
+  <ResponseField name="returns" type="bytes">
+    The raw bytes at the requested range.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="write" type="method">
+  Write bytes into the layer.
+
+  <ParamField path="offset" type="int" required>
+    The address within the layer at which to start writing.
+  </ParamField>
+  <ParamField path="data" type="bytes" required>
+    The data to write.
+  </ParamField>
+
+  <ResponseField name="returns" type="None">
+    Raises `InvalidAddressException` on failure. Writes are not guaranteed to be atomic.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="is_valid" type="method">
+  Check whether a range of bytes can be read.
+
+  <ParamField path="offset" type="int" required>
+    Start address to test.
+  </ParamField>
+  <ParamField path="length" type="int" default="1">
+    Number of bytes to test from `offset`.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool">
+    `True` if the entire range is readable; `False` otherwise.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="scan" type="method">
+  Scan the layer by passing overlapping chunks to a `ScannerInterface` instance.
+
+  <ParamField path="context" type="ContextInterface" required>
+    The context that owns this layer.
+  </ParamField>
+  <ParamField path="scanner" type="ScannerInterface" required>
+    The scanner object that is called for each chunk.
+  </ParamField>
+  <ParamField path="progress_callback" type="callable">
+    Optional callable invoked periodically with `(percent_complete, message)`.
+  </ParamField>
+  <ParamField path="sections" type="list[tuple[int, int]]">
+    List of `(start, size)` tuples that restrict which parts of the layer are scanned. Defaults to the full layer extent.
+  </ParamField>
+
+  <ResponseField name="returns" type="Iterable[Any]">
+    Yields whatever the scanner's `__call__` yields.
+  </ResponseField>
+</ParamField>
+
+### Properties
+
+<ResponseField name="name" type="str">
+  The unique name of this layer within the context's `LayerContainer`.
+</ResponseField>
+
+<ResponseField name="minimum_address" type="int">
+  The lowest valid address in this layer's address space.
+</ResponseField>
+
+<ResponseField name="maximum_address" type="int">
+  The highest valid address in this layer's address space.
+</ResponseField>
+
+<ResponseField name="address_mask" type="int">
+  A bitmask covering all active address bits. Computed from `maximum_address`.
+</ResponseField>
+
+<ResponseField name="metadata" type="Mapping">
+  A read-only mapping of metadata published by this layer, merged with metadata from any dependency layers.
+</ResponseField>
+
+<ResponseField name="dependencies" type="list[str]">
+  Names of layers that this layer depends on. Always empty for `DataLayerInterface` subclasses.
+</ResponseField>
+
+## TranslationLayerInterface
+
+`TranslationLayerInterface` extends `DataLayerInterface` and adds address translation. The key new method is `mapping()`.
+
+<ParamField path="mapping" type="method">
+  Translate a range of virtual addresses into one or more physical ranges.
+
+  <ParamField path="offset" type="int" required>
+    Start virtual address to translate.
+  </ParamField>
+  <ParamField path="length" type="int" required>
+    Number of virtual bytes to translate.
+  </ParamField>
+  <ParamField path="ignore_errors" type="bool" default="False">
+    When `True`, unmappable ranges are skipped and the total returned length may be less than `length`. When `False`, an `InvalidAddressException` is raised for any unmappable address.
+  </ParamField>
+
+  <ResponseField name="returns" type="Iterable[tuple[int, int, int, int, str]]">
+    A sorted iterable of `(offset, sublength, mapped_offset, mapped_length, layer_name)` tuples. Each tuple describes one contiguous translated chunk.
+  </ResponseField>
+</ParamField>
+
+<ResponseField name="dependencies" type="list[str]">
+  Names of the lower layers that this translation layer maps onto. Subclasses must implement this property.
+</ResponseField>
+
+### Example: iterate mappings
+
+```python
+layer = context.layers["kernel"]
+for virt_offset, sublength, phys_offset, phys_length, base_layer in layer.mapping(0xfffff80000000000, 0x1000):
+    print(f"  virt {virt_offset:#x} -> {base_layer}:{phys_offset:#x} ({sublength} bytes)")
+```
+
+## ScannerInterface
+
+`ScannerInterface` objects are passed to `layer.scan()`. The layer feeds them overlapping chunks and collects whatever they yield. Scanners should be fast; defer expensive work to the consumer.
+
+### Attributes
+
+<ResponseField name="chunk_size" type="int">
+  Maximum number of bytes in each chunk fed to `__call__`. Default: `0x1000000` (16 MiB).
+</ResponseField>
+
+<ResponseField name="overlap" type="int">
+  Number of bytes repeated between consecutive chunks so that patterns spanning a chunk boundary are not missed. Default: `0x1000` (4 KiB).
+</ResponseField>
+
+<ResponseField name="thread_safe" type="bool">
+  Set to `True` if the scanner has no mutable state and can be run in parallel across multiple chunks. Default: `False`.
+</ResponseField>
+
+### Abstract method
+
+<ParamField path="__call__" type="method">
+  Called for each data chunk.
+
+  <ParamField path="data" type="bytes" required>
+    The chunk of data to search.
+  </ParamField>
+  <ParamField path="data_offset" type="int" required>
+    The layer offset at which `data` begins.
+  </ParamField>
+
+  <ResponseField name="returns" type="Iterable[Any]">
+    Yields found items. Results must not extend beyond `data_offset + chunk_size` (the overlap region is provided to detect patterns, not to produce duplicate results).
+  </ResponseField>
+</ParamField>
+
+### Example: custom scanner
+
+```python
+from volatility3.framework.interfaces.layers import ScannerInterface
+
+class MagicScanner(ScannerInterface):
+    thread_safe = True
+
+    def __call__(self, data: bytes, data_offset: int):
+        magic = b"MZ"
+        start = 0
+        while True:
+            pos = data.find(magic, start)
+            if pos == -1 or pos >= self.chunk_size:
+                break
+            yield data_offset + pos
+            start = pos + 1
+
+# Usage
+for hit_offset in context.layers["layer0"].scan(context, MagicScanner()):
+    print(f"Found MZ header at {hit_offset:#x}")
+```
+
+## Accessing layers from a context
+
+Layers live in `context.layers`, a `LayerContainer` that implements `collections.abc.Mapping`.
+
+```python
+# Read a specific layer by name
+layer = context.layers["kernel"]
+
+# Read bytes directly through the container
+data = context.layers.read("kernel", 0xfffff80000000000, 0x100)
+
+# Iterate all layer names
+for name in context.layers:
+    print(name, context.layers[name].__class__.__name__)
+```
+
+### Adding and removing layers
+
+```python
+from volatility3.framework.layers.physical import FileLayer
+
+# Add a new data layer (physical layer must be added before any translation layer that depends on it)
+file_layer = FileLayer(context, "config.FileLayer", "base_layer")
+context.layers.add_layer(file_layer)
+
+# Remove a layer (raises LayerException if another layer depends on it)
+context.layers.del_layer("base_layer")
+
+# Obtain a name that is guaranteed not to collide
+safe_name = context.layers.free_layer_name("swap")
+```
+
+<Warning>
+`add_layer()` validates dependencies. If a `TranslationLayerInterface` is added before its dependency layers exist in the container, a `LayerException` is raised.
+</Warning>
+
+## Built-in layer implementations
+
+The `volatility3.framework.layers` package ships the following implementations:
+
+<AccordionGroup>
+  <Accordion title="Intel (IA-32, IA-32e, PAE)">
+    `volatility3.framework.layers.intel` — Implements 32-bit (`Intel`), 32-bit PAE (`IntelPAE`), and 64-bit (`Intel32e`) page-table-based virtual address translation. These are the most commonly used translation layers for Windows, Linux, and macOS analysis.
+
+    Key class properties: `page_size` (always 4096), `bits_per_register`, `minimum_address`, `maximum_address`.
+  </Accordion>
+  <Accordion title="LiME">
+    `volatility3.framework.layers.lime` — Parses the LiME (Linux Memory Extractor) format, a common open-source live acquisition format for Linux systems.
+  </Accordion>
+  <Accordion title="AVML">
+    `volatility3.framework.layers.avml` — Supports the AVML (Azure Virtual Machine Linux) memory acquisition format.
+  </Accordion>
+  <Accordion title="VMware">
+    `volatility3.framework.layers.vmware` — Reads `.vmem` files from VMware virtual machine snapshots.
+  </Accordion>
+  <Accordion title="Crash / Windows crash dump">
+    `volatility3.framework.layers.crash` — Handles Windows crash dump (`.dmp`) files in the Microsoft crash dump format.
+  </Accordion>
+  <Accordion title="ELF core dumps">
+    `volatility3.framework.layers.elf` — Reads ELF-format core dump files produced by Linux kernels.
+  </Accordion>
+  <Accordion title="Xen">
+    `volatility3.framework.layers.xen` — Parses Xen hypervisor memory export files.
+  </Accordion>
+  <Accordion title="QEMU">
+    `volatility3.framework.layers.qemu` — Reads QEMU saved-state (`.qcow2` / monitor dump) memory images.
+  </Accordion>
+  <Accordion title="MSF (Microsoft Storage Format)">
+    `volatility3.framework.layers.msf` — Reads MSF (`.pdb`) structure files as memory layers, used internally during symbol resolution.
+  </Accordion>
+  <Accordion title="Raw / segmented">
+    `volatility3.framework.layers.physical` and `volatility3.framework.layers.segmented` — Provide a plain contiguous raw memory layer and a segmented (non-contiguous) variant.
+  </Accordion>
+  <Accordion title="LeechCore">
+    `volatility3.framework.layers.leechcore` — Interfaces with LeechCore for live acquisition from physical devices and over PCIe.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Run the `frameworkinfo` plugin to list all layer implementations discovered in your current installation: `python -m volatility3 frameworkinfo`.
+</Tip>
+
+## Exception handling
+
+<ResponseField name="InvalidAddressException" type="exception">
+  Raised by `read()` when an address cannot be read and `pad=False`. Also raised by `write()` when the target range is unavailable. Defined in `volatility3.framework.exceptions`.
+</ResponseField>
+
+```python
+from volatility3.framework import exceptions
+
+try:
+    data = context.layers["kernel"].read(0xdeadbeef, 8)
+except exceptions.InvalidAddressException as e:
+    print(f"Cannot read {e.invalid_address:#x} from layer {e.layer_name}")
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Objects API" icon="cube" href="/developers/objects-api">
+    Use layers together with the objects API to read structured data from memory.
+  </Card>
+  <Card title="Symbols API" icon="tag" href="/developers/symbols-api">
+    Symbol tables define the types that the objects API instantiates on layers.
+  </Card>
+</CardGroup>

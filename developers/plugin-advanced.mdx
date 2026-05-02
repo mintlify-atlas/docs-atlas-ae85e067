@@ -1,0 +1,300 @@
+---
+title: "Advanced Plugin Patterns and Best Practices"
+description: "Advanced Volatility 3 plugin techniques: file output, progress callbacks, reusable classmethods, exception handling, versioning, and nested TreeGrid rows."
+---
+
+Once you have a basic Volatility 3 plugin working, several patterns let you write more capable and reusable plugins. This page covers file artifact output, progress reporting, calling other plugins, handling unreadable memory, versioning, and how the automagic system populates complex requirements.
+
+## Reusable classmethods
+
+The `run()` method takes no parameters, which makes it impractical for sharing logic with other plugins. The solution is to expose the core logic as a classmethod with explicit parameters. Any plugin that needs that functionality can then call it directly, passing the context and whatever else it needs.
+
+The `PsList` plugin is the canonical example. Its `list_processes` classmethod accepts a `context`, a `kernel_module_name`, and an optional filter function, and returns an iterable of `EPROCESS` objects:
+
+```python
+@classmethod
+def list_processes(
+    cls,
+    context: interfaces.context.ContextInterface,
+    kernel_module_name: str,
+    filter_func=lambda x: False,
+):
+    kernel = context.modules[kernel_module_name]
+    # ... yield EPROCESS objects
+```
+
+A consuming plugin calls it like this:
+
+```python
+procs = pslist.PsList.list_processes(
+    context=self.context,
+    kernel_module_name=self.config["kernel"],
+    filter_func=filter_func,
+)
+```
+
+When you write a plugin that other plugins might want to call, structure it the same way: put the logic in a classmethod, and have `run()` call that classmethod after reading the required values from `self.config`.
+
+## Creating and using filters
+
+Many list-style plugins accept a PID or name filter from the user. Rather than handling the filtering inline, define a classmethod that converts the user's input into a callable predicate:
+
+```python
+@classmethod
+def create_pid_filter(cls, pid_list=None):
+    """Returns a filter that excludes processes not in pid_list.
+
+    If pid_list is empty or None, no processes are excluded.
+    """
+    filter_list = pid_list or []
+
+    if not filter_list:
+        return lambda x: False  # include everything
+
+    def filter_func(x):
+        return x.UniqueProcessId not in filter_list
+
+    return filter_func
+```
+
+In `run()`, pass the user-supplied config value into the factory:
+
+```python
+def run(self):
+    filter_func = pslist.PsList.create_pid_filter(
+        self.config.get("pid", None)
+    )
+    return renderers.TreeGrid(
+        [...],
+        self._generator(
+            pslist.PsList.list_processes(
+                context=self.context,
+                kernel_module_name=self.config["kernel"],
+                filter_func=filter_func,
+            )
+        ),
+    )
+```
+
+The convention (`False` means include, `True` means exclude) is consistent across Volatility's built-in plugins, so following it makes your filters composable with others.
+
+## Producing file artifacts
+
+Plugins can write files — extracted executables, dumped memory regions, logs, and so on. Because the UI decides how to deliver files to the user (saving to disk, serving over HTTP, etc.), Volatility uses an abstraction called `FileHandlerInterface`.
+
+Call `self.open(preferred_filename)` as a context manager. It returns a file-like object (`IO[bytes]`):
+
+```python
+def _generator(self, procs):
+    for proc in procs:
+        pe_data = self._read_pe(proc)
+        if pe_data:
+            filename = f"pid.{proc.UniqueProcessId}.exe"
+            with self.open(filename) as file_handle:
+                file_handle.write(pe_data)
+            yield (0, (proc.UniqueProcessId, filename))
+```
+
+A few rules to follow:
+
+- Always use `self.open` as a context manager (`with` block) so the file is closed — and therefore committed — automatically.
+- Do not include path separators in the filename; `FileHandlerInterface` will raise `ValueError` if you do.
+- If you receive a `FileHandlerInterface` from another plugin's method, it may not be closed yet so you can change `preferred_filename` or append data before closing it yourself.
+
+<Warning>
+If the file handle is never closed the UI may not be able to deliver the file to the user. Always use the `with` block or call `.close()` explicitly.
+</Warning>
+
+## Progress callbacks
+
+Long-running generators should report progress so interactive UIs can display a progress bar. Call `self._progress_callback(percentage, description)` periodically. `percentage` is a float from `0` to `100`.
+
+```python
+def _generator(self):
+    layer = self.context.layers[self.config["primary"]]
+    total = layer.maximum_address
+
+    addr = 0
+    while addr < total:
+        # ... process one page
+        addr += page_size
+        self._progress_callback(
+            (addr * 100) / total,
+            "Scanning memory",
+        )
+        yield ...
+```
+
+`_progress_callback` is always safe to call — when no progress callback is provided by the UI, it defaults to a no-op lambda.
+
+## Handling exceptions
+
+Memory images are incomplete by definition. Reads at any address may fail. Volatility communicates these failures through exceptions rather than sentinel values.
+
+`exceptions.InvalidAddressException` is the base class for all address-related failures. Catch it around any memory read that you can recover from:
+
+```python
+value = renderers.UnreadableValue()
+try:
+    value = structure.SomeField.get_string()
+except exceptions.InvalidAddressException:
+    pass  # value stays as UnreadableValue
+```
+
+More specific subclasses let you distinguish the reason for the failure when that matters:
+
+| Exception | Meaning |
+|---|---|
+| `InvalidAddressException` | Base class; the address could not be read |
+| `PagedInvalidAddressException` | Address is in a paged-out region |
+| `SwappedInvalidAddressException` | Address has been swapped to disk |
+
+Non-fatal exceptions should be caught at the level where you can substitute a sensible absent value. Fatal exceptions — ones that mean the plugin cannot continue at all — should be allowed to propagate so the UI can report them.
+
+## Absent value types
+
+When a column value cannot be provided, use one of the four absent value classes from `volatility3.framework.renderers` rather than `None` or an empty string. Each variant communicates a different reason to the renderer and the user.
+
+| Class | When to use |
+|---|---|
+| `UnreadableValue` | The data physically cannot be read from the image |
+| `UnparsableValue` | The data is present but cannot be interpreted correctly |
+| `NotApplicableValue` | The column concept does not apply to this row (e.g., a Linux field on a Windows row) |
+| `NotAvailableValue` | The value might be available with a newer symbol table or plugin version, but isn't now |
+
+```python
+BaseDllName = renderers.UnreadableValue()  # default before the try block
+try:
+    BaseDllName = entry.BaseDllName.get_string()
+except exceptions.InvalidAddressException:
+    pass  # BaseDllName remains UnreadableValue
+```
+
+Renderers display absent values as `-` or `N/A` depending on the subclass, so users always see an explicit signal rather than a blank cell.
+
+## Versioning
+
+### Plugin version (`_version`)
+
+Set `_version` as a `(major, minor, patch)` tuple on your class:
+
+```python
+_version = (2, 0, 0)
+```
+
+Increment the **major** version when you make incompatible changes to your public classmethods (other plugins that call your code would break). Increment the **minor** version when you add new functionality in a backward-compatible way. Increment the **patch** version for bug fixes.
+
+### Framework version (`_required_framework_version`)
+
+```python
+_required_framework_version = (2, 0, 0)
+```
+
+Set this to the lowest framework version that provides every feature your plugin uses. The framework checks that its own version satisfies this requirement before running your plugin.
+
+Use the lowest applicable version to support the greatest number of installations. At the time of writing, specifying `(2, 0, 0)` covers all Volatility 3 installations.
+
+### Declaring a dependency on another plugin
+
+Use `VersionRequirement` (not the deprecated `PluginRequirement`) to assert a version constraint on another plugin or component:
+
+```python
+requirements.VersionRequirement(
+    name="pslist",
+    component=pslist.PsList,
+    version=(2, 0, 0),
+),
+```
+
+The framework checks that `pslist.PsList._version` is compatible — same major, minor equal or higher — before your plugin runs.
+
+<Note>
+`PluginRequirement` is deprecated as of the current codebase and will be removed in a future release. Use `VersionRequirement` with `component=` instead of `plugin=`.
+</Note>
+
+## Casting objects
+
+Symbol structures expose their fields with the types defined by the symbol table. Sometimes you need a different type — a Python `str` instead of an array of `CHAR`, or a `UNICODE_STRING` reinterpreted as a `wchar` pointer. Use the `.cast()` method on any `ObjectInterface`:
+
+```python
+process_name = proc.ImageFileName.cast(
+    "string",
+    max_length=proc.ImageFileName.vol.count,
+    errors="replace",
+)
+```
+
+The first argument is either a native type name (`"string"`, `"pointer"`, etc.) or a fully-qualified symbol type (`"<table>!_UNICODE_STRING"`). Additional keyword arguments are forwarded to the type constructor.
+
+Cast values must match the column type of the `TreeGrid`. Casting to `"string"` produces a Python `str`; casting to a structure type produces a Volatility object, which cannot be placed directly in a `str` column.
+
+## Nested TreeGrid rows
+
+The first element of each yielded tuple is the depth (indentation level). Use values greater than `0` to create parent–child relationships in the output:
+
+```python
+def _generator(self, procs):
+    for proc in procs:
+        # depth 0 — process row
+        yield (0, (proc.UniqueProcessId, proc.ImageFileName.cast("string", ...)))
+
+        for module in proc.load_order_modules():
+            # depth 1 — module rows nested under the process
+            yield (1, (module.DllBase, module.BaseDllName.get_string()))
+```
+
+Renderers that support trees (such as the text renderer with `-r pretty`) indent child rows visually. Flat renderers (CSV, JSON) include the depth as a column value so the structure is preserved.
+
+<Tip>
+Use nested rows when your data has a natural hierarchy (process → module, process → handle, etc.) and you want the relationship to be visible in tree-capable renderers.
+</Tip>
+
+## Calling other plugins from your plugin
+
+To run a complete plugin — not just call its classmethod — you need to construct it through the framework so its configuration is correctly populated:
+
+```python
+from volatility3.framework import automagic, plugins
+
+automagics = automagic.choose_automagic(
+    automagic.available(self._context), plugin_class
+)
+plugin = plugins.construct_plugin(
+    self.context,
+    automagics,
+    plugin_class,
+    self.config_path,
+    self._progress_callback,
+    self.open,
+)
+result = plugin.run()
+```
+
+`construct_plugin` re-runs the automagic selection for the target plugin because its requirements may differ from yours. Pass your own `config_path`, `_progress_callback`, and `open` method so the sub-plugin operates in the same context and reports progress to the same UI.
+
+This pattern is used by aggregate plugins such as `Timeliner`, which iterates over all available plugins that implement a timeliner interface and runs each one.
+
+## How automagic populates ModuleRequirement
+
+When you declare a `ModuleRequirement`, you do not ask the user for a layer name or symbol table name directly. Instead, Volatility's automagic system examines the memory image, identifies the kernel, and fills in the underlying `TranslationLayerRequirement` and `SymbolTableRequirement` sub-requirements automatically.
+
+The resulting module name is stored in the configuration under your requirement's name (`"kernel"` in the DllList example). Always read it from `self.config["kernel"]` — never hard-code the name, because the automagic may append a counter suffix (e.g., `kernel2`) if a name is already in use.
+
+```python
+kernel = self.context.modules[self.config["kernel"]]
+layer_name = kernel.layer_name
+symbol_table = kernel.symbol_table_name
+```
+
+The module object itself lives in `self.context.modules` and exposes `layer_name` and `symbol_table_name` properties, giving you everything you need to access memory and resolve types.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Plugin basics" icon="book-open" href="/developers/plugin-basics">
+    Review the full step-by-step guide to writing your first plugin.
+  </Card>
+  <Card title="Requirements reference" icon="list" href="/developers/requirements">
+    Every requirement type, its parameters, and usage examples.
+  </Card>
+</CardGroup>

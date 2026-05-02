@@ -1,0 +1,257 @@
+---
+title: "Volshell: Interactive Volatility Memory Exploration"
+description: "Use Volshell to interactively inspect memory images, traverse OS structures, run plugins, scan for patterns, and execute scripts in a Python shell."
+---
+
+Volshell is an interactive Python shell built on top of the Volatility 3 framework. Instead of running a single plugin and exiting, it keeps the memory image loaded so you can explore structures, run arbitrary plugins, and iterate on ideas without restarting from scratch. It is particularly useful during investigation and plugin development.
+
+## Starting Volshell
+
+<Steps>
+  <Step title="Launch with a memory image">
+    Pass the image path with `-f` and, optionally, an OS flag to load the right symbol tables:
+
+    ```bash
+    # Generic mode (no OS-specific helpers)
+    volshell -f /path/to/memory.raw
+
+    # Windows mode
+    volshell -f /path/to/memory.raw -w
+
+    # Linux mode
+    volshell -f /path/to/memory.raw -l
+
+    # macOS mode
+    volshell -f /path/to/memory.raw -m
+    ```
+  </Step>
+  <Step title="Read the startup banner">
+    When Volshell starts it prints the current mode, active layer, symbol table, and kernel name:
+
+    ```text
+    Volshell (Volatility 3 Framework) 2.0.2
+    Readline imported successfully    PDB scanning finished
+
+        Call help() to see available functions
+
+        Volshell mode        : Windows
+        Current Layer        : primary
+        Current Symbol Table : ntkrnlmp.pdb...
+        Current Kernel Name  : kernel
+
+    (primary) >>>
+    ```
+
+    The prompt shows the name of the current layer. You can change layers at any time with `cl()`.
+  </Step>
+  <Step title="List available commands">
+    Type `help()` at the prompt to see every built-in function and its docstring:
+
+    ```python
+    (primary) >>> help()
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Without an OS flag (`-w`, `-l`, or `-m`) Volshell starts in Generic mode. No
+  symbols are loaded and OS-specific helpers are not available. Run with the
+  appropriate flag to get the full feature set.
+</Note>
+
+## Built-in commands
+
+All commands have a short alias and a long form. Both are available from the prompt.
+
+### Navigation and context
+
+| Alias | Long form | Description |
+|-------|-----------|-------------|
+| `cl` | `change_layer` | Switch the active layer by name. |
+| `cs` | `change_symboltable` | Switch the active symbol table. |
+| `ck` | `change_kernel` | Switch the active kernel module. |
+| `context` | — | The raw `context` object containing all layers and the symbol space. |
+| `self` | — | The Volshell plugin instance (access config via `self.config`). |
+
+### Inspecting structures
+
+| Alias | Long form | Description |
+|-------|-----------|-------------|
+| `dt` | `display_type` | Describe the members of a type or an object instance. |
+| `ds` | `display_symbols` | List all symbols in a symbol table alphabetically. |
+
+### Memory display
+
+| Alias | Long form | Description |
+|-------|-----------|-------------|
+| `db` | `display_bytes` | Show bytes and ASCII at an offset (16 bytes wide). |
+| `dw` | `display_words` | Show 2-byte words and ASCII. |
+| `dd` | `display_doublewords` | Show 4-byte double-words and ASCII. |
+| `dq` | `display_quadwords` | Show 8-byte quad-words and ASCII. |
+| `dis` | `disassemble` | Disassemble instructions from an offset (requires `capstone`). |
+| `rx` | `regex_scan` | Scan the active layer for a regex pattern (pass `bytes`, e.g. `rb"pattern"`). |
+
+### Running plugins
+
+| Alias | Long form | Description |
+|-------|-----------|-------------|
+| `dpo` | `display_plugin_output` | Run a plugin and print its output to the terminal. |
+| `gt` | `generate_treegrid` | Run a plugin and return the raw `TreeGrid` object. |
+| `rt` | `render_treegrid` | Render a `TreeGrid` produced by `gt`. |
+
+### Utilities
+
+| Alias | Long form | Description |
+|-------|-----------|-------------|
+| `lf` | `load_file` | Load a file as a physical layer and return the layer name. |
+| `rs` | `run_script` | Execute a Python script file within the Volshell context. |
+| `cc` | `create_configurable` | Construct a layer or symbol table from keyword arguments. |
+| `bp` | `breakpoint` | Set a read breakpoint on an address in a layer. |
+| `bl` | `breakpoint_list` | List all active breakpoints. |
+| `bc` | `breakpoint_clear` | Clear one or all breakpoints. |
+| `hh` | `help` | Print help for all built-in functions. |
+
+## Accessing OS objects
+
+All OS modes expose a `ps()` function that returns the process list as a Python list of Volatility objects.
+
+```python
+# Get the first process
+(primary) >>> proc = ps()[0]
+(primary) >>> proc
+<EPROCESS symbol_table_name1!_EPROCESS: primary @ 0xe08ff2459040 #1968>
+```
+
+Access members directly as Python attributes — pointer dereference is automatic:
+
+```python
+(primary) >>> proc.UniqueProcessId
+356
+
+# Follow a pointer chain without explicit dereferencing
+(primary) >>> proc.Pcb.DirectoryTableBase
+4355817472
+```
+
+## Displaying type information
+
+`dt` (display_type) accepts either a type name string or a live object:
+
+```python
+# Display the layout of a type by name
+(primary) >>> dt('_EPROCESS')
+symbol_table_name1!_EPROCESS (1968 bytes)
+   0x0 :   Pcb                     symbol_table_name1!_KPROCESS
+ 0x2d8 :   ProcessLock             symbol_table_name1!_EX_PUSH_LOCK
+ 0x2e8 :   UniqueProcessId         symbol_table_name1!pointer
+...
+
+# Display with live values by passing an object instance
+(primary) >>> dt(proc)
+symbol_table_name1!_EPROCESS (1968 bytes)
+   0x0 :   Pcb                     symbol_table_name1!_KPROCESS   0xe08ff2459040
+ 0x2e8 :   UniqueProcessId         symbol_table_name1!pointer     4
+...
+```
+
+## Running plugins interactively
+
+Import a plugin class and pass it to `dpo`. Volatility will tell you if any required configuration is missing:
+
+```python
+(primary) >>> from volatility3.plugins.windows import pslist
+
+# First attempt — shows the missing requirement
+(primary) >>> display_plugin_output(pslist.PsList)
+Unable to validate the plugin requirements: ['...PsList.kernel']
+
+# Check what the plugin needs
+(primary) >>> pslist.PsList.get_requirements()
+[<ModuleRequirement: kernel>, <BooleanRequirement: physical>, ...]
+
+# Provide the kernel configuration and run
+(primary) >>> display_plugin_output(pslist.PsList, kernel=self.config['kernel'])
+
+PID    PPID   ImageFileName   Offset(V)           Threads  ...
+4      0      System          0x8c0bcac87040      143      ...
+356    4      smss.exe        0x8c0bccf8d040      3        ...
+```
+
+To work with results programmatically, use `gt` to get the `TreeGrid` and populate it:
+
+```python
+(primary) >>> treegrid = gt(pslist.PsList, kernel=self.config['kernel'])
+(primary) >>> treegrid.populate()
+# Now iterate over treegrid nodes directly
+```
+
+## Scanning for patterns
+
+`rx` scans the active layer for a regular expression pattern. Pass `bytes` using the `rb""` prefix:
+
+```python
+(primary) >>> rx(rb"(Linux version|Darwin Kernel Version) [0-9]+\.[0-9]+\.[0-9]+")
+0x880001400070    4c 69 6e 75 78 20 76 65 72 73 69 6f 6e 20 33 2e    Linux.version.3.
+0x880001400080    32 2e 30 2d 34 2d 61 6d 64 36 34 20 28 64 65 62    2.0-4-amd64.(deb
+...
+```
+
+An optional `count` argument controls how many bytes to display for each match.
+
+## Running scripts
+
+For longer analysis tasks, write a Python script that references `self` and `context` directly, then execute it with `rs`:
+
+```python
+# At the prompt
+(primary) >>> rs('/path/to/myscript.py')
+```
+
+Or pass a script at startup with `--script` to run it immediately. Combine with `--script-only` to exit after the script completes — useful for automated pipelines:
+
+```bash
+volshell -f memory.raw -w --script /path/to/analysis.py --script-only
+```
+
+Example script that extracts a memory range to a file:
+
+```python
+import volatility3.framework.layers.mynewlayer as mynewlayer
+
+layer = cc(mynewlayer.MyNewLayer, on_top_of='primary', other_parameter='important')
+with open('output.dmp', 'wb') as fp:
+    for i in range(0, 0x4000000, 0x1000):
+        data = layer.read(i, 0x1000, pad=True)
+        fp.write(data)
+```
+
+All Python built-ins and Volshell helpers (`cc`, `cl`, `dt`, etc.) are available inside scripts.
+
+## Loading additional files
+
+Add a second memory file as a physical layer at any time:
+
+```python
+(primary) >>> layer_name = lf('/path/to/swap.raw')
+(primary) >>> layer_name
+'FileLayer1'
+```
+
+The new layer is available in `context.layers` under the returned name.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Writing plugins" icon="plug" href="/developers/plugin-basics">
+    Graduate from Volshell exploration to a reusable plugin with a defined interface.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/using/symbol-tables">
+    Understand how symbol tables are found and how to create them for Linux and macOS.
+  </Card>
+  <Card title="Output formats" icon="file-export" href="/using/output-formats">
+    Learn how TreeGrid data flows through renderers to the terminal or a file.
+  </Card>
+  <Card title="vol CLI" icon="terminal" href="/using/cli">
+    Reference for all global flags used when running non-interactive analysis.
+  </Card>
+</CardGroup>

@@ -1,0 +1,193 @@
+---
+title: "macOS Memory Forensics with Volatility 3"
+description: "Analyze macOS memory images with Volatility 3: process lists, network connections, open files, kernel extensions, and suspicious memory regions."
+---
+
+macOS memory forensics with Volatility 3 lets you inspect a captured memory image to recover process activity, network connections, open files, loaded kernel extensions, and signs of malicious code. Like Linux, macOS analysis requires a matching symbol table (ISF file) built from the kernel's debug information. This page covers acquiring memory, preparing symbols, and using the key macOS plugins.
+
+<Warning>
+As of the Volatility 3 parity release, macOS analysis support is no longer actively maintained. The existing macOS plugins remain available but may not receive future updates or bug fixes. See the [official announcement](https://volatilityfoundation.org/announcing-the-official-parity-release-of-volatility-3/) for details.
+</Warning>
+
+## Acquiring memory
+
+Volatility 3 analyzes memory images; it does not capture memory itself. Use a tool such as **[osxpmem](https://github.com/Velocidex/c-aff4/releases/download/3.2/osxpmem_3.2.zip)** to acquire a macOS memory image. Other commercial acquisition tools are also available.
+
+## Preparing symbol tables
+
+macOS analysis requires an ISF (Intermediate Symbol Format) file that matches the exact Darwin kernel version of the captured system. Volatility 3 cannot generate one automatically for macOS.
+
+<Steps>
+  <Step title="Check for a pre-built symbol table">
+    The Volatility Foundation provides a collection of pre-built macOS ISF files:
+
+    ```
+    https://downloads.volatilityfoundation.org/volatility3/symbols/mac.zip
+    ```
+
+    Download and extract the archive, then place the matching `.json.xz` file under `volatility3/symbols/mac/`. Volatility 3 detects symbol tables in this directory automatically.
+  </Step>
+
+  <Step title="Identify the Darwin kernel version from the image">
+    If you do not know the kernel version, run the `banners` plugin against the image:
+
+    ```bash
+    vol -f <image> banners.Banners
+    ```
+
+    Example output:
+
+    ```
+    Offset      Banner
+    0x4d2c7d0   Darwin Kernel Version 16.7.0: Thu Jun 15 17:36:27 PDT 2017; root:xnu-3789.70.16~2/RELEASE_X86_64
+    ```
+
+    Use the Darwin version string to find the matching ISF file.
+  </Step>
+
+  <Step title="Build a symbol table with dwarf2json">
+    If no pre-built ISF file is available for your Darwin version, use [dwarf2json](https://github.com/volatilityfoundation/dwarf2json) to generate one from the kernel's DWARF debug information:
+
+    ```bash
+    dwarf2json mac --macho /path/to/kernel.dSYM > mac-<version>.json
+    xz mac-<version>.json
+    mv mac-<version>.json.xz volatility3/symbols/mac/
+    ```
+
+    Refer to the [symbol tables documentation](/using/symbol-tables) for full instructions on building macOS ISF files.
+  </Step>
+</Steps>
+
+## Getting help for a plugin
+
+Every plugin accepts `-h` to print its options and output column descriptions:
+
+```bash
+vol mac.pslist -h
+```
+
+## Key plugins
+
+### Process analysis
+
+<Steps>
+  <Step title="List running processes">
+    `mac.pslist` walks the kernel's task list and prints one row per process with identifiers, ownership, and timing information.
+
+    ```bash
+    vol -f <image> mac.pslist
+    ```
+
+    Output columns: `OFFSET`, `NAME`, `PID`, `UID`, `GID`, `Start Time`, `PPID`
+
+    ```
+    OFFSET      NAME              PID   UID   GID   Start Time   PPID
+    -           kernel_task       0     0     0     -            0
+    -           launchd           1     0     0     -            0
+    -           UserEventAgent    35    0     0     -            1
+    -           kextd             38    0     0     -            1
+    ```
+  </Step>
+
+  <Step title="View the process tree">
+    `mac.pstree` presents the same process list formatted as a parent-child hierarchy. Child processes are prefixed with `*` characters indicating their depth.
+
+    ```bash
+    vol -f <image> mac.pstree
+    ```
+
+    Output columns: `PID`, `PPID`, `COMM`
+
+    ```
+    PID   PPID  COMM
+    1     0     launchd
+    204   1     softwareupdated
+    * 449 204   SoftwareUpdateCo
+    337   1     system_installd
+    * 455 337   update_dyld_shar
+    ```
+  </Step>
+</Steps>
+
+### File and network analysis
+
+<CardGroup cols={2}>
+  <Card title="mac.lsof" icon="folder-open">
+    Lists open file descriptors for each process, including regular files, sockets, and device nodes.
+
+    ```bash
+    vol -f <image> mac.lsof
+    ```
+
+    Columns: `PID`, `File Descriptor`, `File Path`
+  </Card>
+  <Card title="mac.netstat" icon="network-wired">
+    Enumerates active network sockets from kernel socket structures, covering both TCP and UDP connections.
+
+    ```bash
+    vol -f <image> mac.netstat
+    ```
+
+    Columns: `Offset`, `Proto`, `Local IP`, `Local Port`, `Remote IP`, `Remote Port`, `State`, `Process`
+  </Card>
+</CardGroup>
+
+### Shell history
+
+`mac.bash` recovers bash command history from process memory. It can surface commands that were never written to `.bash_history` on disk.
+
+```bash
+vol -f <image> mac.bash
+```
+
+Output columns: `PID`, `Process`, `CommandTime`, `Command`
+
+### Kernel extension analysis
+
+`mac.lsmod` enumerates loaded kernel extensions (kexts), which are macOS's equivalent of kernel modules. Malicious kexts can intercept system calls, hide processes, and manipulate network traffic.
+
+```bash
+vol -f <image> mac.lsmod
+```
+
+Output columns: `Offset`, `Name`, `Size`
+
+<Tip>
+Cross-reference the loaded kexts against the system's known-good kext list to identify unauthorized extensions. Pay particular attention to kexts with unfamiliar bundle identifiers or those not signed by Apple.
+</Tip>
+
+### Malware detection
+
+`mac.malfind` scans process virtual memory mappings for regions that are executable and not backed by a file on disk — common characteristics of injected code or unpacked payloads.
+
+```bash
+vol -f <image> mac.malfind
+```
+
+Output columns: `PID`, `Process`, `Start`, `End`, `Protection`, `Hexdump`, `Disasm`
+
+Key indicators to investigate:
+- **Anonymous + executable mappings**: memory with execute permission that is not mapped from a file on disk
+- **Disassembly patterns**: shellcode stubs, repetitive `nop` sequences, or unusual instruction patterns
+- **Unexpected processes**: system daemons or signed binaries with writable-executable memory warrant closer inspection
+
+<Warning>
+`mac.malfind` produces false positives for JIT-compiled code in runtimes such as Safari's JavaScript engine and the JVM. Verify flagged regions with additional context before drawing conclusions.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Windows memory forensics" icon="windows" href="/tutorials/windows">
+    Analyze Windows memory images with process, network, registry, and malware plugins.
+  </Card>
+  <Card title="Linux memory forensics" icon="linux" href="/tutorials/linux">
+    Analyze Linux memory images with process, network, and kernel module plugins.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/using/symbol-tables">
+    Learn how to create and manage ISF symbol tables for macOS and Linux.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/using/cli">
+    Full reference for Volatility 3 command-line options and flags.
+  </Card>
+</CardGroup>

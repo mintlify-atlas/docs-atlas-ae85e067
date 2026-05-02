@@ -1,0 +1,422 @@
+---
+title: "Symbols API: Type Definitions and Lookups in Volatility 3"
+description: "Reference for Volatility 3's symbols API — SymbolInterface, SymbolTableInterface, SymbolSpace, ISF format, and OS-specific type extensions."
+---
+
+The Volatility 3 symbols API manages type definitions and named memory locations. It bridges the gap between raw bytes in a memory layer and structured objects by providing the schemas (templates) used to interpret those bytes. This page covers `SymbolInterface`, `SymbolTableInterface`, `SymbolSpace`, the Intermediate Symbol Format (ISF), and the OS-specific extension modules — all defined in `volatility3.framework.interfaces.symbols` and `volatility3.framework.symbols`.
+
+## Overview
+
+Volatility 3 organises type information in three layers:
+
+<Steps>
+  <Step title="SymbolInterface — a named address">
+    A `SymbolInterface` represents a single named location in a program's memory. It holds a name, a numeric address relative to the compilation unit, and an optional `Template` (type definition). A symbol without a type is still valid and can be used as a plain address.
+  </Step>
+  <Step title="SymbolTableInterface — a collection of symbols, types, and enumerations">
+    A `SymbolTableInterface` is the loaded contents of a single ISF JSON file. It stores symbols, type templates, and enumerations, and exposes methods to look them up by name.
+  </Step>
+  <Step title="SymbolSpace — all tables in a context">
+    A `SymbolSpace` is an ordered collection of `SymbolTableInterface` objects attached to a `Context`. Cross-table references are resolved through the space using the `table!name` naming convention.
+  </Step>
+</Steps>
+
+## SymbolInterface
+
+Defined in `volatility3/framework/interfaces/symbols.py`.
+
+<ResponseField name="name" type="str">
+  The symbol name within its table. Cannot contain the `!` character.
+</ResponseField>
+
+<ResponseField name="address" type="int">
+  The relative numeric address of the symbol within the compilation unit.
+</ResponseField>
+
+<ResponseField name="type" type="Template | None">
+  The type template associated with this symbol, or `None` if the symbol has no type information.
+</ResponseField>
+
+<ResponseField name="type_name" type="str | None">
+  The `type_name` from the associated template, or `None` if `type` is `None`.
+</ResponseField>
+
+<ResponseField name="constant_data" type="bytes | None">
+  Any constant bytes associated with the symbol (used for compile-time constants).
+</ResponseField>
+
+## SymbolTableInterface
+
+`SymbolTableInterface` (and its base `BaseSymbolTableInterface`) expose the following lookup methods:
+
+### Symbol lookups
+
+<ParamField path="get_symbol" type="method">
+  Resolve a symbol name to a `SymbolInterface`.
+
+  <ParamField path="name" type="str" required>
+    The bare symbol name (without the table prefix).
+  </ParamField>
+
+  <ResponseField name="returns" type="SymbolInterface">
+    The matching symbol.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="get_symbols_by_type" type="method">
+  Yield the names of all symbols whose type matches `type_name`.
+
+  <ParamField path="type_name" type="str" required>
+    The type name to filter by (with or without a table qualifier).
+  </ParamField>
+
+  <ResponseField name="returns" type="Iterable[str]">
+    Symbol names that have a matching type.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="get_symbols_by_location" type="method">
+  Yield the names of all symbols that live within a given address range.
+
+  <ParamField path="offset" type="int" required>
+    Start address of the range.
+  </ParamField>
+  <ParamField path="size" type="int" default="0">
+    Length of the range. A size of `0` matches symbols at exactly `offset`.
+  </ParamField>
+
+  <ResponseField name="returns" type="Iterable[str]">
+    Matching symbol names.
+  </ResponseField>
+</ParamField>
+
+### Type lookups
+
+<ParamField path="get_type" type="method">
+  Resolve a type name to an `ObjectTemplate`.
+
+  <ParamField path="name" type="str" required>
+    The bare type name.
+  </ParamField>
+
+  <ResponseField name="returns" type="Template">
+    The template for the requested type.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="get_symbol_type" type="method">
+  Convenience method that resolves a symbol and then returns its type template.
+
+  <ParamField path="name" type="str" required>
+    Symbol name.
+  </ParamField>
+
+  <ResponseField name="returns" type="Template | None">
+    The type template, or `None` if the symbol has no type.
+  </ResponseField>
+</ParamField>
+
+### Enumeration lookups
+
+<ParamField path="get_enumeration" type="method">
+  Retrieve an enumeration by name from `SymbolSpace.get_enumeration()`.
+
+  <ParamField path="name" type="str" required>
+    The enumeration name.
+  </ParamField>
+
+  <ResponseField name="returns" type="Template">
+    A template whose `vol.choices` mapping contains the enumeration values.
+  </ResponseField>
+</ParamField>
+
+### Membership tests
+
+<ParamField path="has_symbol" type="method">
+  Check whether a symbol exists in the space.
+
+  <ParamField path="name" type="str" required>
+    Fully qualified `table!symbol` name.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool" />
+</ParamField>
+
+<ParamField path="has_type" type="method">
+  Check whether a type exists in the space.
+
+  <ParamField path="name" type="str" required>
+    Fully qualified `table!type` name.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool" />
+</ParamField>
+
+<ParamField path="has_enumeration" type="method">
+  Check whether an enumeration exists in the space.
+
+  <ParamField path="name" type="str" required>
+    Fully qualified `table!enumeration` name.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool" />
+</ParamField>
+
+### Class overrides
+
+<ParamField path="set_type_class" type="method">
+  Override the Python class used to instantiate objects of a given type. The OS-specific extension modules use this to attach extra methods to kernel structs.
+
+  <ParamField path="name" type="str" required>
+    The type name whose class is being overridden.
+  </ParamField>
+  <ParamField path="clazz" type="type[ObjectInterface]" required>
+    The replacement class.
+  </ParamField>
+</ParamField>
+
+## SymbolSpace
+
+`SymbolSpace` (defined in `volatility3/framework/symbols/__init__.py`) implements `SymbolSpaceInterface` and holds an **ordered** collection of `BaseSymbolTableInterface` objects. Every `Context` owns exactly one `SymbolSpace`, accessed via `context.symbol_space`.
+
+### The `table!name` convention
+
+All cross-table lookups use the `!` separator to qualify names:
+
+```
+nt_symbols!_EPROCESS
+vmlinux!task_struct
+ntkrnlmp!PsActiveProcessHead
+```
+
+The portion before `!` is the table name; the portion after `!` is the symbol, type, or enumeration name within that table.
+
+### Accessing the symbol space
+
+```python
+# Get the symbol space from the context
+space = context.symbol_space
+
+# Look up a type across all tables
+template = space.get_type("nt_symbols!_EPROCESS")
+
+# Look up a symbol across all tables
+sym = space.get_symbol("nt_symbols!PsActiveProcessHead")
+print(f"{sym.name} @ {sym.address:#x}")
+
+# Membership test
+if space.has_type("nt_symbols!_EPROCESS"):
+    pass
+```
+
+### Adding a symbol table
+
+```python
+from volatility3.framework.symbols import intermed
+
+# Load an ISF file into the context
+table_name = intermed.IntermediateSymbolTable.create(
+    context=context,
+    config_path="config",
+    sub_path="windows",
+    filename="ntkrnlmp",
+)
+# The table is now accessible as context.symbol_space[table_name]
+```
+
+<ParamField path="SymbolSpace.append" type="method">
+  Add a `BaseSymbolTableInterface` to the space. If a table with the same name already exists it is replaced.
+
+  <ParamField path="value" type="BaseSymbolTableInterface" required>
+    The table to add.
+  </ParamField>
+</ParamField>
+
+<ParamField path="SymbolSpace.free_table_name" type="method">
+  Return a table name with the given prefix that is not already in use.
+
+  <ParamField path="prefix" type="str" default="layer">
+    Prefix for the generated name.
+  </ParamField>
+
+  <ResponseField name="returns" type="str">
+    An unused table name.
+  </ResponseField>
+</ParamField>
+
+### Resolving types
+
+`SymbolSpace.get_type()` performs iterative resolution of all `ReferenceTemplate` children before returning the template, ensuring that self-referential and cross-referential types (e.g. linked-list nodes) are fully resolved before they are used:
+
+```python
+# Fully resolved template — all member types are concrete
+tmpl = context.symbol_space.get_type("nt_symbols!_EPROCESS")
+print(tmpl.size)  # size in bytes
+```
+
+## ISF format overview
+
+Volatility 3 reads symbol information from **Intermediate Symbol Format** (ISF) JSON files. ISF is a common intermediary between Windows PDB files, Linux DWARF data, and Volatility's internal representation.
+
+An ISF file has the following top-level keys:
+
+<AccordionGroup>
+  <Accordion title="metadata">
+    Producer information, format version, OS details, and creation timestamp. Used by `verify_table_versions()` to validate tables.
+
+    ```json
+    {
+      "metadata": {
+        "format": "6.2.0",
+        "producer": {
+          "name": "dwarf2json",
+          "version": "0.8.0",
+          "datetime": "2024-01-15T12:00:00"
+        }
+      }
+    }
+    ```
+  </Accordion>
+  <Accordion title="base_types">
+    Primitive C types (e.g. `unsigned int`, `long`) with their size, signedness, and endianness. These are resolved via the `NativeTableInterface`.
+
+    ```json
+    {
+      "base_types": {
+        "unsigned int": { "size": 4, "signed": false, "kind": "int", "endian": "little" }
+      }
+    }
+    ```
+  </Accordion>
+  <Accordion title="types">
+    Composite types (structs and unions) with their size and member definitions. Each member specifies an offset and a type reference.
+
+    ```json
+    {
+      "types": {
+        "_EPROCESS": {
+          "size": 1648,
+          "kind": "struct",
+          "fields": {
+            "UniqueProcessId": { "offset": 368, "type": { "kind": "base", "name": "unsigned long long" } }
+          }
+        }
+      }
+    }
+    ```
+  </Accordion>
+  <Accordion title="symbols">
+    Named addresses within the compiled binary. Each entry has an address and an optional type reference.
+
+    ```json
+    {
+      "symbols": {
+        "PsActiveProcessHead": { "address": 18446735277570523904, "type": { "kind": "struct", "name": "_LIST_ENTRY" } }
+      }
+    }
+    ```
+  </Accordion>
+  <Accordion title="enums">
+    Named integer enumerations with their base type and a mapping of values to names.
+
+    ```json
+    {
+      "enums": {
+        "_POOL_TYPE": {
+          "base": "unsigned long",
+          "size": 4,
+          "constants": { "NonPagedPool": 0, "PagedPool": 1 }
+        }
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Use [dwarf2json](https://github.com/volatilityfoundation/dwarf2json) to generate ISF files from Linux and macOS kernels. For Windows, the automagic subsystem downloads and converts PDB files automatically.
+</Tip>
+
+## NativeTableInterface
+
+`NativeTableInterface` maps C primitive type names to Python-side type handling. It is provided as the `native_types` argument when constructing a `SymbolTableInterface`. Native tables never contain symbols or enumerations — they only provide type templates for base types like `int`, `unsigned long`, or `pointer`.
+
+```python
+# Access the native types for a table
+native = context.symbol_space["nt_symbols"].natives
+```
+
+## OS-specific extensions
+
+Volatility 3 enriches the base objects with OS-specific Python classes that add helper methods. These are registered via `set_type_class()` when the symbol table is loaded.
+
+<CardGroup cols={2}>
+  <Card title="Windows extensions" icon="windows">
+    `volatility3.framework.symbols.windows.extensions`
+
+    Adds methods to Windows kernel structures such as `_EPROCESS`, `_ETHREAD`, `_TOKEN`, `_HANDLE_TABLE`, and more. Methods include helpers for decoding UNICODE_STRING fields, following pool tags, and interpreting flags.
+  </Card>
+  <Card title="Linux extensions" icon="linux">
+    `volatility3.framework.symbols.linux.extensions`
+
+    Adds methods to Linux kernel structures such as `task_struct`, `mm_struct`, `vm_area_struct`, and `net_device`. Methods include helpers for reading command lines, iterating memory maps, and resolving network addresses.
+  </Card>
+  <Card title="macOS extensions" icon="apple">
+    `volatility3.framework.symbols.mac.extensions`
+
+    Adds methods to macOS XNU kernel structures such as `proc`, `task`, `vm_map_entry`, and `socket`. Methods include helpers for interpreting Mach-O mappings and BSD socket structures.
+  </Card>
+  <Card title="Generic extensions" icon="code">
+    `volatility3.framework.symbols.generic.extensions`
+
+    Provides cross-platform helpers attached to fundamental types like `_LIST_ENTRY` for walking doubly-linked lists.
+  </Card>
+</CardGroup>
+
+### Example: using an extension method
+
+```python
+from volatility3.framework.symbols.windows.extensions import EPROCESS
+
+# After symbol table is loaded, _EPROCESS objects automatically use the extended class
+for eproc in plugin.list_processes():
+    # get_cmdline() is an extension method on the Windows _EPROCESS class
+    print(eproc.UniqueProcessId, eproc.ImageFileName.cast("string", max_length=15))
+```
+
+## SymbolError exception
+
+<ResponseField name="SymbolError" type="exception">
+  Raised when a symbol, type, or enumeration cannot be found or resolved. Defined in `volatility3.framework.exceptions`. The exception carries `symbol_name` and `table_name` attributes.
+</ResponseField>
+
+```python
+from volatility3.framework import exceptions
+
+try:
+    sym = context.symbol_space.get_symbol("nt_symbols!NonExistentSymbol")
+except exceptions.SymbolError as e:
+    print(f"Symbol {e.symbol_name!r} not found in table {e.table_name!r}")
+```
+
+## Helper utility
+
+`volatility3.framework.symbols.symbol_table_is_64bit()` is a convenience function that returns `True` if the pointer type in a named symbol table is 8 bytes wide:
+
+```python
+from volatility3.framework.symbols import symbol_table_is_64bit
+
+if symbol_table_is_64bit(context, "nt_symbols"):
+    print("64-bit kernel")
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Layers API" icon="layer-group" href="/developers/layers-api">
+    Layers provide the raw bytes that the objects API reads using type definitions from symbol tables.
+  </Card>
+  <Card title="Objects API" icon="cube" href="/developers/objects-api">
+    Objects are constructed from symbol table type definitions on top of memory layers.
+  </Card>
+</CardGroup>

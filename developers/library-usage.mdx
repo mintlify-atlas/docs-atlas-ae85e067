@@ -1,0 +1,267 @@
+---
+title: "Using Volatility 3 as a Python Library"
+description: "Embed Volatility 3 in your own Python applications to run plugins, consume results, and build automated memory forensics pipelines."
+---
+
+Volatility 3 is designed to be used both as a command-line tool and as an embeddable Python library. This page walks through every step required to drive Volatility 3 programmatically — from verifying the interface version to consuming the final `TreeGrid` output — so you can integrate memory forensics into your own applications and scripts.
+
+## Overview
+
+The full process for using Volatility 3 as a library follows this sequence:
+
+1. Check the interface version
+2. Create a `Context`
+3. _(Optional)_ Discover available plugins
+4. _(Optional)_ Query plugin requirements
+5. Set configuration in the context
+6. _(Optional)_ Run automagic
+7. Instantiate and run the plugin
+8. Render the `TreeGrid`
+
+The sections below walk through each step in detail, with a [complete working example](#complete-example) at the end.
+
+## Step-by-step walkthrough
+
+<Steps>
+  <Step title="Check the interface version">
+    Before doing any work, verify that the installed Volatility 3 framework is compatible with your code. The framework uses semantic versioning: any version with the same major number and a higher or equal minor number satisfies the requirement.
+
+    ```python
+    import volatility3.framework
+    volatility3.framework.require_interface_version(2, 0, 0)
+    ```
+
+    If the installed framework does not satisfy the requirement, `require_interface_version` raises a `RuntimeError` immediately, preventing subtle failures later.
+  </Step>
+
+  <Step title="Create a Context">
+    A `Context` is the central object that holds all state for a forensics session — the memory layers, symbol spaces, and configuration tree. Constructing one is straightforward:
+
+    ```python
+    from volatility3.framework import contexts
+
+    ctx = contexts.Context()
+    ```
+
+    A `Context` is **not** a singleton: you can create multiple independent contexts and pass them to different plugins without interference. See [Context and Configuration](/developers/context-configuration) for a deeper explanation of what a context holds.
+  </Step>
+
+  <Step title="Discover available plugins (optional)">
+    If you need to enumerate the plugins that are available at runtime, load them first with `import_files`, then call `list_plugins`:
+
+    ```python
+    import volatility3.plugins
+    from volatility3 import framework
+    from volatility3.framework import constants
+
+    # Optionally prepend custom plugin directories
+    volatility3.plugins.__path__ = ["/path/to/my/plugins"] + list(constants.PLUGINS_PATH)
+
+    # Import everything under the volatility3.plugins namespace
+    failures = framework.import_files(volatility3.plugins, True)
+
+    # Get a dict of {plugin_name: PluginClass}
+    plugin_list = framework.list_plugins()
+    ```
+
+    The `True` parameter tells `import_files` to swallow import errors and collect them in the returned `failures` list instead of raising. Set it to `False` if you want strict failure on missing dependencies.
+
+    <Note>
+      Volatility 3 uses the `volatility3.plugins` namespace for all plugins, including those shipped with the framework under `volatility3.framework.plugins`. Always import from `volatility3.plugins` and never from the internal framework namespace — this lets users override built-in plugins without needing write access to the framework directory.
+    </Note>
+  </Step>
+
+  <Step title="Query plugin requirements (optional)">
+    Each plugin class exposes its required inputs through `get_requirements()`. This returns a list of `RequirementInterface` objects that describe parameter names, types, and whether they are optional:
+
+    ```python
+    chosen_plugin = plugin_list["windows.pslist.PsList"]
+    for req in chosen_plugin.get_requirements():
+        print(req.name, type(req).__name__, req.optional)
+    ```
+
+    Requirements come in two broad categories:
+
+    - **Simple type requirements** — integers, booleans, floats, and strings.
+    - **Complex requirements** — lists, choices, translation layer requirements, and symbol table requirements.
+
+    You can call `unsatisfied()` on the plugin class at any point to see which requirements have not yet been met by the current context configuration.
+  </Step>
+
+  <Step title="Set configuration in the context">
+    Plugin configuration lives in a hierarchical key-value tree on the context. The conventional base path for plugins is `"plugins"`, and each plugin's parameters sit under `plugins.<PluginClassName>.<param>`:
+
+    ```python
+    from volatility3.framework.configuration import requirements
+    from volatility3.framework.interfaces.configuration import path_join
+
+    base_config_path = "plugins"
+    plugin = plugin_list["windows.pslist.PsList"]
+
+    # Build the config path for a specific parameter
+    config_path = path_join(base_config_path, plugin.__name__, "kernel")
+
+    # Set the value directly on the context's config dict
+    ctx.config[config_path] = "value"
+    ```
+
+    Always use `path_join` to build configuration paths — it uses the correct separator and will continue to work if the framework ever changes that separator.
+  </Step>
+
+  <Step title="Run automagic (optional)">
+    Automagic modules can automatically satisfy many requirements for you — for example, by stacking the correct file format and architecture layers on top of a raw memory file, or by locating operating system metadata. This is the recommended approach for complex layer setups:
+
+    ```python
+    from volatility3.framework import automagic
+
+    # Get all available automagics, pre-configured for the current context
+    available_automagics = automagic.available(ctx)
+
+    # Filter down to those appropriate for the target plugin's OS
+    automagics = automagic.choose_automagic(available_automagics, plugin)
+
+    # Run them, providing a progress callback if desired
+    def progress_callback(percentage, description):
+        print(f"\r[{percentage:.2f}%] {description}", end="")
+
+    errors = automagic.run(
+        automagics,
+        ctx,
+        plugin,
+        base_config_path,
+        progress_callback=progress_callback,
+    )
+    ```
+
+    Any exceptions that occur inside an automagic are caught and returned as a list of `TracebackException` objects rather than propagated, so you can inspect and log them after the run.
+  </Step>
+
+  <Step title="Instantiate and run the plugin">
+    Before instantiating the plugin, confirm that all its requirements are satisfied:
+
+    ```python
+    plugin_config_path = path_join(base_config_path, plugin.__name__)
+    unsatisfied = plugin.unsatisfied(ctx, plugin_config_path)
+
+    if unsatisfied:
+        raise RuntimeError(f"Unmet requirements: {unsatisfied}")
+    ```
+
+    If `unsatisfied` is empty, construct and run the plugin:
+
+    ```python
+    constructed = plugin(
+        ctx,
+        plugin_config_path,
+        progress_callback=progress_callback,
+    )
+
+    # Optionally set a file handler for plugins that produce auxiliary files
+    # constructed.set_open_method(file_handler)
+
+    treegrid = constructed.run()
+    ```
+
+    The `run()` method returns a `TreeGrid` object. At this point, the `TreeGrid` may not yet contain data — it wraps a generator and defers actual processing until the grid is populated.
+  </Step>
+
+  <Step title="Render the TreeGrid">
+    Populate the `TreeGrid` by calling `populate()` with a visitor function and an initial accumulator. This is where the plugin's generator runs and actual results are produced:
+
+    ```python
+    for column in treegrid.columns:
+        print(column.name, end="\t")
+    print()
+
+    def visitor(node, accumulator):
+        # path_depth starts at 1; use max to avoid negative indent
+        print("*" * max(0, node.path_depth - 1), end=" ")
+        for column_index in range(len(treegrid.columns)):
+            print(repr(node.values[column_index]), end="\t")
+        print()
+        return accumulator
+
+    treegrid.populate(visitor, None)
+    ```
+
+    For more advanced rendering options, see [Rendering TreeGrid Output](/developers/rendering).
+  </Step>
+</Steps>
+
+## Complete example
+
+The following self-contained script brings all the steps above together to list processes from a Windows memory image:
+
+```python
+import volatility3.plugins
+import volatility3.framework
+from volatility3 import framework
+from volatility3.framework import contexts, automagic, plugins
+from volatility3.framework.interfaces.configuration import path_join
+
+# 1. Verify interface version
+framework.require_interface_version(2, 0, 0)
+
+# 2. Create a context
+ctx = contexts.Context()
+
+# 3. Load all plugins
+import volatility3.plugins
+failures = framework.import_files(volatility3.plugins, True)
+
+# 4. Pick a plugin
+plugin_list = framework.list_plugins()
+plugin = plugin_list["windows.pslist.PsList"]
+
+# 5. Set required configuration
+base_config_path = "plugins"
+ctx.config[path_join(base_config_path, plugin.__name__, "single_location")] = (
+    "file:///path/to/memory.raw"
+)
+
+# 6. Run automagic
+available_automagics = automagic.available(ctx)
+automagics = automagic.choose_automagic(available_automagics, plugin)
+errors = automagic.run(automagics, ctx, plugin, base_config_path)
+
+# 7. Instantiate and run
+plugin_config_path = path_join(base_config_path, plugin.__name__)
+unsatisfied = plugin.unsatisfied(ctx, plugin_config_path)
+if unsatisfied:
+    raise RuntimeError(f"Unsatisfied requirements: {unsatisfied}")
+
+constructed = plugin(ctx, plugin_config_path)
+treegrid = constructed.run()
+
+# 8. Render output
+for column in treegrid.columns:
+    print(f"{column.name:<20}", end="")
+print()
+
+def visitor(node, _acc):
+    for value in node.values:
+        print(f"{str(value):<20}", end="")
+    print()
+    return _acc
+
+treegrid.populate(visitor, None)
+```
+
+## The `construct_plugin` convenience function
+
+The `automagic.run`, unsatisfied check, and plugin instantiation steps (6–7) are available as a single helper:
+
+```python
+from volatility3.framework import plugins as fw_plugins
+
+constructed = fw_plugins.construct_plugin(
+    ctx,
+    automagics,
+    plugin,
+    base_config_path,
+    progress_callback=None,
+    open_method=None,
+)
+```
+
+`construct_plugin` runs automagic, verifies that all requirements are satisfied (raising `UnsatisfiedException` if not), instantiates the plugin, and optionally sets the file handler — all in one call. It is the approach used internally by the Volatility 3 CLI.

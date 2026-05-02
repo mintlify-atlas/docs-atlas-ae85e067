@@ -1,0 +1,224 @@
+---
+title: "How to Contribute to the Volatility 3 Open-Source Project"
+description: "How to report bugs, submit pull requests, and follow the coding standards that all Volatility 3 open-source contributions must meet."
+---
+
+Volatility 3 is an open-source project maintained by the Volatility Foundation and its community. This page covers how to report bugs effectively, how to contribute code, and the coding standards your changes must meet before a pull request is accepted.
+
+## Reporting bugs
+
+Report bugs at the [GitHub Issues tracker](https://github.com/volatilityfoundation/volatility3/issues).
+
+To help maintainers reproduce and fix the issue quickly, include the following in every bug report:
+
+| Field | Example |
+|---|---|
+| Volatility version | `2.25.0` |
+| OS running Volatility | `Ubuntu 22.04 x86_64` |
+| Python version | `3.11.4` |
+| Suspected OS of the memory sample | `Windows 10 22H2 x64` |
+| Complete command line | `vol -f sample.raw windows.pslist` |
+
+<Tip>
+  Enable verbose output with `-vvv` (or up to `-vvvvvv`) and paste the full
+  terminal output into the issue. Text is preferred over screenshots — it is
+  searchable and makes it easier to reference specific lines.
+</Tip>
+
+## Contributing code
+
+<Steps>
+  <Step title="Fork and clone the repository">
+    Fork [volatilityfoundation/volatility3](https://github.com/volatilityfoundation/volatility3) on GitHub, then clone your fork locally:
+
+    ```bash
+    git clone https://github.com/<your-username>/volatility3.git
+    cd volatility3
+    ```
+  </Step>
+  <Step title="Create a virtual environment">
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate   # Windows: venv\Scripts\activate
+    ```
+  </Step>
+  <Step title="Install development dependencies">
+    The `[dev]` extras install the test runner, linter, and formatter:
+
+    ```bash
+    pip install -e ".[dev]"
+    ```
+  </Step>
+  <Step title="Create a feature branch">
+    ```bash
+    git checkout -b feature/my-improvement
+    ```
+  </Step>
+  <Step title="Make your changes">
+    Write code that follows the style guide below. Add or update tests where appropriate.
+  </Step>
+  <Step title="Run the linter and formatter">
+    All code is linted and formatted by [Ruff](https://docs.astral.sh/ruff/). The CI pipeline rejects submissions that fail either check:
+
+    ```bash
+    ruff check .
+    ruff format .
+    ```
+  </Step>
+  <Step title="Run the test suite">
+    ```bash
+    pytest
+    ```
+  </Step>
+  <Step title="Submit a pull request">
+    Push your branch to your fork and open a pull request against the `develop` branch. Describe what the change does and why, and link any related issues.
+  </Step>
+</Steps>
+
+<Note>
+  The default branch is `develop`. The `stable` branch always points to the
+  latest stable release. Submit pull requests against `develop`.
+</Note>
+
+## Coding style
+
+Volatility 3 follows a style guide based on [Google's Python Style Guide](https://google.github.io/styleguide/pyguide.html) with project-specific modifications. The complete rules are enforced by Ruff; the sections below describe the decisions that are not purely mechanical.
+
+### Imports
+
+Use import statements for packages and modules only — not for individual types, classes, or functions.
+
+```python
+# Correct
+import volatility3.framework.interfaces.plugins as plugins_iface
+from volatility3.framework import renderers
+
+# Incorrect — imports a class directly
+from volatility3.framework.renderers import TreeGrid
+```
+
+Use `from x import y as z` only when:
+- Two modules named `y` are imported in the same file
+- `y` conflicts with a name in the current module or public API
+- `y` is inconveniently long or too generic in context
+
+**Exceptions**: `typing`, `collections.abc`, and `typing_extensions` symbols may be imported directly to support type annotations.
+
+### Global mutable state
+
+Avoid global mutable state. When unavoidable, declare it at the module level with a leading underscore and provide access through a public function or class method. Explain the design rationale in a comment. Module-level constants are fine and encouraged.
+
+```python
+# Correct: named constant, immutable
+MAX_SCAN_CHUNK_SIZE = 0x1000000
+
+# Correct: mutable global with underscore + accessor
+_cache: dict = {}
+
+def get_cache() -> dict:
+    return _cache
+```
+
+### Exceptions
+
+Never use bare `except:`, `except Exception:`, or `except StandardError:` unless you are re-raising the exception or at a top-level isolation point (such as a thread boundary) where you intentionally suppress and log all errors.
+
+```python
+# Incorrect
+try:
+    result = parse_header(data)
+except:
+    pass
+
+# Correct
+try:
+    result = parse_header(data)
+except ValueError as e:
+    vollog.debug(f"Invalid header: {e}")
+    return None
+```
+
+### Versioning
+
+Modules that inherit from `VersionableInterface` declare a `_version` attribute as a `(MAJOR, MINOR, PATCH)` tuple using [Semantic Versioning](https://semver.org/):
+
+- **MAJOR** — breaking change to inputs or outputs; increment and reset MINOR and PATCH to 0
+- **MINOR** — backward-compatible addition; increment and reset PATCH to 0
+- **PATCH** — internal fix with no external interface change; increment only
+
+Plugins additionally declare `_required_framework_version` using the same tuple format. Volatility checks this at load time and refuses to run the plugin if the major version does not match.
+
+```python
+class MyPlugin(interfaces.plugins.PluginInterface):
+    _required_framework_version = (2, 0, 0)
+    _version = (1, 0, 0)
+```
+
+### Shared plugin functionality
+
+Functions useful to other plugins should be `classmethod`s, not `staticmethod`s or instance methods. A `classmethod` gives the caller information about the class it is defined on, which `staticmethod` does not provide.
+
+A `classmethod` should accept a `context` as its first argument and, if configuration is needed, a config path string as its second. All other arguments should be basic types (strings, integers, etc.) to keep future parallelisation straightforward.
+
+```python
+@classmethod
+def list_processes(
+    cls,
+    context: interfaces.context.ContextInterface,
+    kernel_module_name: str,
+):
+    kernel = context.modules[kernel_module_name]
+    # ...
+```
+
+### Comprehensions
+
+Comprehensions are allowed but must not contain multiple `for` clauses or multiple filter expressions. Prioritise readability over conciseness.
+
+### Format strings
+
+Prefer f-strings. Use format modifiers instead of separate method calls:
+
+```python
+# Correct
+address_str = f"0x{offset:x}"
+
+# Incorrect
+address_str = f"{hex(offset)}"
+```
+
+**Exception**: in logging calls, use `%`-style formatting or pass arguments to the logger so that the string is not evaluated when the log level is disabled:
+
+```python
+vollog.debug("Processing offset %d", offset)
+```
+
+### Boolean and None checks
+
+```python
+# Use implicit truthiness
+if items:          # not: if len(items) != 0
+    pass
+
+# Use is None / is not None explicitly
+if result is None:
+    pass
+
+# Never compare booleans with ==
+if not flag:       # not: if flag == False
+    pass
+```
+
+## Community
+
+Join the community on Slack for discussion, questions, and announcements:
+
+[https://www.volatilityfoundation.org/slack](https://www.volatilityfoundation.org/slack)
+
+## Contact
+
+For project inquiries, contact the Volatility Foundation:
+
+- **Web**: [https://www.volatilityfoundation.org](https://www.volatilityfoundation.org)
+- **Email**: volatility (at) volatilityfoundation.org
+- **Blog**: [https://volatility-labs.blogspot.com](https://volatility-labs.blogspot.com)

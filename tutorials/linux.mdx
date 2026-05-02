@@ -1,0 +1,229 @@
+---
+title: "Linux Memory Forensics with Volatility 3"
+description: "Analyze Linux memory images with Volatility 3: process lists, bash command history, network state, kernel modules, and malware detection."
+---
+
+Linux memory forensics with Volatility 3 lets you inspect a captured memory image to recover process activity, bash command history, network state, loaded kernel modules, and signs of malicious code. Unlike Windows, Linux analysis requires a matching symbol table (ISF file) built from the kernel's debug information. This page covers acquiring memory, preparing symbols, and using the key Linux plugins.
+
+## Acquiring memory
+
+Volatility 3 analyzes memory images; it does not capture memory itself. Use one of these tools to acquire a Linux memory image:
+
+- **[AVML](https://github.com/microsoft/avml)** (Acquire Volatile Memory for Linux) — open-source, maintained by Microsoft, does not require a kernel module
+- **[LiME](https://github.com/504ensicsLabs/LiME)** (Linux Memory Extractor) — loadable kernel module that writes memory to disk or over a network
+
+<Warning>
+Verify the maintenance status and kernel version compatibility of any acquisition tool before use. An incompatible tool can produce a corrupt or incomplete image.
+</Warning>
+
+## Preparing symbol tables
+
+Linux analysis requires an ISF (Intermediate Symbol Format) file that matches the exact kernel version of the captured system. Volatility 3 cannot generate one automatically for Linux.
+
+<Steps>
+  <Step title="Check for a pre-built symbol table">
+    The [volatility3-symbols](https://github.com/Abyss-W4tcher/volatility3-symbols) repository provides pre-generated `.json.xz` ISF files organized by kernel version for Debian, Ubuntu, AlmaLinux, and other popular distributions.
+
+    Search for your kernel version there before building manually.
+  </Step>
+
+  <Step title="Identify the kernel version from the image">
+    If you do not know the kernel version, run the `banners` plugin against the image:
+
+    ```bash
+    vol -f memory.vmem banners
+    ```
+
+    Example output:
+
+    ```
+    Offset          Banner
+    0x141c1390      Linux version 4.15.0-42-generic (buildd@lgw01-amd64-023) ...
+    ```
+
+    Use the kernel version string to find or build the correct ISF file.
+  </Step>
+
+  <Step title="Build a symbol table with dwarf2json">
+    If no pre-built ISF file is available, use [dwarf2json](https://github.com/volatilityfoundation/dwarf2json) to generate one from the kernel's DWARF debug information:
+
+    ```bash
+    dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-$(uname -r) > linux-<version>.json
+    ```
+
+    Then compress and place the file in the Volatility 3 symbols directory:
+
+    ```bash
+    xz linux-<version>.json
+    mv linux-<version>.json.xz volatility3/symbols/linux/
+    ```
+
+    Volatility 3 automatically detects and uses symbol tables placed under `volatility3/symbols/`.
+  </Step>
+</Steps>
+
+<Note>
+The kernel package providing DWARF debug symbols is typically named `linux-image-<version>-dbgsym` on Debian/Ubuntu or `kernel-debuginfo` on RHEL/Fedora. The exact package name varies by distribution.
+</Note>
+
+## Getting help for a plugin
+
+Every plugin accepts `-h` to print its options and output column descriptions:
+
+```bash
+vol linux.pslist -h
+```
+
+## Key plugins
+
+### Process analysis
+
+<Steps>
+  <Step title="List running processes">
+    `linux.pslist` walks the kernel task list from memory and prints metadata for each process, including user and group IDs.
+
+    ```bash
+    vol -f memory.vmem linux.pslist
+    ```
+
+    Output columns: `OFFSET (V)`, `PID`, `TID`, `PPID`, `COMM`, `UID`, `GID`, `EUID`, `EGID`, `CREATION TIME`, `File output`
+
+    ```
+    OFFSET (V)          PID  TID  PPID  COMM      UID  GID  EUID  EGID  CREATION TIME
+    0x8ca6db1aac80      1    1    0     systemd   0    0    0     0     2022-02-10 06:50:16 UTC
+    0x8ca6db1a9640      2    2    0     kthreadd  0    0    0     0     2022-02-10 06:50:16 UTC
+    ```
+  </Step>
+
+  <Step title="View the process tree">
+    `linux.pstree` presents the process hierarchy as a parent-child tree. Child processes are prefixed with `*` characters indicating their depth.
+
+    ```bash
+    vol -f memory.vmem linux.pstree
+    ```
+
+    Output columns: `OFFSET (V)`, `PID`, `TID`, `PPID`, `COMM`
+
+    ```
+    OFFSET (V)          PID   TID   PPID  COMM
+    0x8ca6db1aac80      1     1     0     systemd
+    * 0x8ca6db3342c0    278   278   1     systemd-journal
+    * 0x8ca6d005ac80    315   315   1     systemd-udevd
+    **** 0x8ca671215900 1527  1527  1507  Xorg
+    ```
+
+    Use this view to spot unusual parent-child relationships, orphaned processes, or unexpected shell execution chains.
+  </Step>
+
+  <Step title="Recover bash command history">
+    `linux.bash` recovers bash command history from process memory. It can surface commands that were never written to `.bash_history` on disk.
+
+    ```bash
+    vol -f memory.vmem linux.bash
+    ```
+
+    Output columns: `PID`, `Process`, `CommandTime`, `Command`
+
+    ```
+    PID   Process  CommandTime                     Command
+    1733  bash     2020-01-16 14:00:36.000000      sudo apt upgrade
+    1733  bash     2020-01-16 14:00:41.000000      chmod +x meterpreter
+    1733  bash     2020-01-16 14:00:42.000000      sudo ./meterpreter
+    ```
+  </Step>
+</Steps>
+
+### File and network analysis
+
+<CardGroup cols={2}>
+  <Card title="linux.lsof" icon="folder-open">
+    Lists open file descriptors for each process, including regular files, sockets, pipes, and device nodes.
+
+    ```bash
+    vol -f memory.vmem linux.lsof
+    ```
+
+    Columns: `PID`, `Process`, `FD`, `Path`, `Type`, `Size`
+  </Card>
+  <Card title="linux.netfilter" icon="shield">
+    Enumerates Netfilter hooks registered in the kernel. Malicious kernel modules often register hooks to intercept or manipulate network traffic.
+
+    ```bash
+    vol -f memory.vmem linux.netfilter
+    ```
+  </Card>
+</CardGroup>
+
+### Kernel module analysis
+
+`linux.lsmod` lists all loaded kernel modules, equivalent to the `lsmod` command on a live system.
+
+```bash
+vol -f memory.vmem linux.lsmod
+```
+
+Output columns: `Offset`, `Module Name`, `Code Size`, `Taints`, `Load Arguments`, `File Output`
+
+<Tip>
+Pair `linux.lsmod` with `linux.check_modules` or `linux.hidden_modules` to detect kernel modules that have been unlinked from the module list to hide themselves from standard enumeration.
+</Tip>
+
+### Malware detection
+
+`linux.malfind` scans process virtual memory areas (VMAs) for regions that are executable, not backed by a file, and contain code-like content — common characteristics of injected shellcode or unpacked payloads.
+
+```bash
+vol -f memory.vmem linux.malfind
+```
+
+Output columns: `PID`, `Process`, `Start`, `End`, `Path`, `Protection`, `Hexdump`, `Disasm`
+
+```
+PID  Process          Start            End              Path               Protection
+540  networkd-dispat  0x7f1506482000   0x7f1506483000   Anonymous Mapping  rwx
+```
+
+Key indicators to investigate:
+- **Anonymous Mapping + rwx**: memory not backed by a file with execute permission is unusual for legitimate processes
+- **Disassembly patterns**: repetitive `nop` sleds, shellcode stubs, or JIT-like sequences
+- **Unexpected processes**: system services with dynamic executable memory warrant closer inspection
+
+<Warning>
+`linux.malfind` produces false positives for JIT-compiled code in runtimes such as the JVM and Node.js. Verify flagged regions with additional context.
+</Warning>
+
+### Mount and page cache analysis
+
+<CardGroup cols={2}>
+  <Card title="linux.mountinfo" icon="hard-drive">
+    Enumerates mounted filesystems from the kernel's mount namespace structures, including bind mounts and container-specific mounts.
+
+    ```bash
+    vol -f memory.vmem linux.mountinfo
+    ```
+  </Card>
+  <Card title="linux.pagecache" icon="database">
+    Extracts file content from the kernel page cache. Can recover file data that was read or written but never flushed to disk.
+
+    ```bash
+    vol -f memory.vmem linux.pagecache
+    ```
+  </Card>
+</CardGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Windows memory forensics" icon="windows" href="/tutorials/windows">
+    Analyze Windows memory images with process, network, registry, and malware plugins.
+  </Card>
+  <Card title="macOS memory forensics" icon="apple" href="/tutorials/mac">
+    Analyze macOS memory images with Volatility 3.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/using/symbol-tables">
+    Learn how to create and manage ISF symbol tables for Linux and macOS.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/using/cli">
+    Full reference for Volatility 3 command-line options and flags.
+  </Card>
+</CardGroup>

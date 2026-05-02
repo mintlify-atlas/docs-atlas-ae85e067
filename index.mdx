@@ -1,133 +1,92 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "Volatility 3: Memory Forensics Framework"
+description: "Volatility 3 is the world's leading open-source memory forensics framework. Extract digital artifacts from RAM dumps across Windows, Linux, and macOS."
 ---
 
-## Setting up
+Volatility 3 is the world's most widely used framework for extracting digital artifacts from volatile memory (RAM) samples. Built as a complete rewrite, it delivers a clean plugin architecture, automatic symbol table resolution, and a powerful Python library that can be embedded in your own tools and workflows.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Volatility 3 via pip or from source. Supports Python 3.8+.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first memory analysis in minutes with a real memory image.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="CLI Reference" icon="terminal" href="/using/cli">
+    Master the `vol` command: flags, plugins, output options, and filters.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Write a Plugin" icon="plug" href="/developers/plugin-basics">
+    Extend Volatility with custom plugins using the PluginInterface.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you can do with Volatility 3
 
-Everything you need to create world-class documentation.
+Volatility 3 analyzes memory images from live systems or memory acquisition tools. You can investigate running processes, network connections, loaded drivers, registry keys, and much more — all without running code on the target system.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Windows Analysis" icon="windows" href="/tutorials/windows">
+    Process lists, DLL injection, registry, handles, and crash dump analysis.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Linux Analysis" icon="linux" href="/tutorials/linux">
+    Kernel modules, bash history, network sockets, and process trees.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="macOS Analysis" icon="apple" href="/tutorials/mac">
+    Mach-O structures, kernel extensions, and BSD process information.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## How it works
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Acquire a memory image">
+    Use a tool like WinPmem, LiME, or AVML to capture a RAM dump from your target system.
+  </Step>
+  <Step title="Run a plugin">
+    Point Volatility at the image and choose a plugin. Automagic handles layer stacking and symbol resolution automatically.
+    ```bash
+    vol -f memory.raw windows.pslist
+    ```
+  </Step>
+  <Step title="Analyze the output">
+    Results are rendered as a table, JSON, CSV, or SQLite — or consumed programmatically via the Python library API.
+  </Step>
+  <Step title="Extend with custom plugins">
+    Write your own analysis plugins by inheriting from `PluginInterface` and defining requirements and a `run()` method.
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+## Core concepts
 
-## Need inspiration?
+<CardGroup cols={2}>
+  <Card title="Memory Layers" icon="layer-group" href="/concepts/memory-layers">
+    Understand how Volatility models physical and virtual memory as a directed graph of layers.
+  </Card>
+  <Card title="Symbol Tables" icon="table" href="/concepts/symbol-tables">
+    Learn how ISF JSON symbol files enable OS-specific structure parsing across thousands of kernel versions.
+  </Card>
+  <Card title="Automagic" icon="wand-magic-sparkles" href="/concepts/automagic">
+    See how Volatility automatically identifies OS type, architecture, and loads the right symbol tables.
+  </Card>
+  <Card title="Framework Architecture" icon="sitemap" href="/concepts/architecture">
+    Explore the plugin, layer, context, and renderer abstractions that make up the framework.
+  </Card>
+</CardGroup>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
+## Use as a library
+
+Volatility 3 is designed to be embedded. Import it into your Python application to build custom forensics pipelines, automated triage tools, or SIEM integrations.
+
+```python
+import volatility3.plugins
+from volatility3 import framework
+from volatility3.framework import contexts, automagic, plugins
+
+framework.require_interface_version(2, 0, 0)
+ctx = contexts.Context()
+# ... configure and run plugins programmatically
+```
+
+<Card title="Library Usage Guide" icon="book" href="/developers/library-usage">
+  Full walkthrough: create a context, configure plugins, run automagic, and render results.
 </Card>

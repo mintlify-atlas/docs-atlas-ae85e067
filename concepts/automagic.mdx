@@ -1,0 +1,181 @@
+---
+title: "Automagic: Automatic Context Configuration"
+description: "How Volatility 3's automagic system automatically detects image formats, stacks memory layers, and loads symbol tables before a plugin runs."
+---
+
+Volatility 3's **automagic** system handles the repetitive setup work that every analysis session requires: detecting the memory image format, stacking translation layers, locating the kernel's page table base, and loading the correct symbol table. This page explains what each automagic does, how to invoke them, and how to skip them when you are building the context yourself.
+
+## What automagic does
+
+Before a plugin can run, the `Context` must contain the right layers and symbol tables with the right configuration values. Doing this manually requires detailed knowledge of the image format, OS version, and kernel internals. Automagics remove that burden.
+
+Each automagic is an `AutomagicInterface` subclass with a `priority` attribute. They run in priority order so that earlier automagics (e.g. layer stacking) can provide information that later automagics (e.g. OS-specific symbol resolution) depend on.
+
+<Note>Automagics are entirely optional. The Volatility 3 CLI enables them by default. When using Volatility 3 as a library, you can build the context manually and skip automagics completely, or run only the ones you need.</Note>
+
+## Available automagics
+
+<AccordionGroup>
+  <Accordion title="LayerStacker" icon="layer-group" defaultOpen={false}>
+    **Priority: 10** (runs first)
+
+    `LayerStacker` wraps a raw file in the appropriate format layers by trial-and-error. Starting from a plain `FileLayer`, it works through all registered `StackerLayerInterface` subclasses in `stack_order` order, applying each stacker that successfully identifies the current top layer.
+
+    Supported formats include: LiME, VMware (`.vmem` / `.vmss` / `.vmsn`), AVML, Windows crash dumps, ELF core dumps, Xen saves, QEMU suspend images, MSF, and raw/padded flat files.
+
+    The stacker respects per-OS exclusion lists: only stackers compatible with the target OS category are applied when the plugin's OS can be determined from its module path.
+
+    ```python
+    from volatility3.framework.automagic.stacker import choose_os_stackers
+    stackers = choose_os_stackers(plugin_class)
+    ```
+  </Accordion>
+
+  <Accordion title="Windows automagic" icon="windows" defaultOpen={false}>
+    The Windows automagic (`volatility3.framework.automagic.windows`) locates the kernel's **directory table base (DTB)** by scanning the physical layer for known kernel signatures, then constructs an Intel translation layer using that DTB.
+
+    It also triggers the **PDB scan** automagic (`pdbscan`) which:
+    1. Locates the kernel module in memory
+    2. Reads the PDB GUID and age from the debug directory
+    3. Downloads the matching PDB file from Microsoft's symbol servers (if not cached)
+    4. Converts it to ISF JSON
+    5. Loads the resulting symbol table into `context.symbol_space`
+
+    This means Windows analysis typically works without any manual symbol file preparation.
+  </Accordion>
+
+  <Accordion title="Linux automagic" icon="linux" defaultOpen={false}>
+    The Linux automagic (`volatility3.framework.automagic.linux`) searches the physical layer for the kernel's **banner string** (e.g. `Linux version 5.15.0-...`). It uses the banner to identify the exact kernel version and locate a matching ISF file in `volatility3/symbols/linux/` or `~/.cache/volatility3`.
+
+    Once the symbol table is loaded, it reads the kernel's `swapper_pg_dir` (or `init_top_pgt` on x86-64) to build the kernel virtual layer.
+  </Accordion>
+
+  <Accordion title="macOS automagic" icon="apple" defaultOpen={false}>
+    The macOS automagic (`volatility3.framework.automagic.mac`) works similarly to the Linux automagic: it searches for the kernel version string embedded in the image, matches it against available ISF files, loads the symbol table, and constructs the virtual layer using the kernel's page tables.
+  </Accordion>
+
+  <Accordion title="Symbol cache" icon="database" defaultOpen={false}>
+    `SymbolCacheMagic` (`volatility3.framework.automagic.symbol_cache`) builds and maintains an index of all ISF files found in the configured symbol paths. This index is stored at `~/.cache/volatility3` and avoids rescanning the directory tree on every run.
+
+    The cache maps kernel identifiers (banner strings, PDB GUIDs) to ISF file paths so that the OS-specific automagics can resolve the correct file in O(1) lookups.
+  </Accordion>
+</AccordionGroup>
+
+## Choosing automagics for a plugin
+
+`automagic.choose_automagic()` filters the full list of available automagics down to those compatible with a specific plugin. It detects the plugin's OS category from its module path (e.g. `volatility3.plugins.windows.*` → Windows) and removes automagics that list that OS in their `exclusion_list`.
+
+```python
+from volatility3.framework import automagic
+
+# Get all automagic instances in priority order
+available = automagic.available(context)
+
+# Filter to only those compatible with the plugin
+selected = automagic.choose_automagic(available, plugin_class)
+```
+
+If the plugin's OS category cannot be determined, all available automagics are returned unchanged.
+
+## Running automagics
+
+`automagic.run()` executes each selected automagic in order, passing the context and the plugin's requirement tree. Each automagic modifies `context.config` and `context.layers` to satisfy as many requirements as possible.
+
+```python
+from volatility3.framework import automagic
+
+errors = automagic.run(
+    automagics=selected,
+    context=context,
+    configurable=plugin_class,
+    config_path="plugins.MyPlugin",
+    progress_callback=lambda pct, msg: print(f"{pct:.0f}% {msg}"),
+)
+
+for error in errors:
+    print("Automagic error:", "".join(error.format()))
+```
+
+`run()` returns a list of `TracebackException` objects for any automagic that raised an exception. Non-fatal errors are collected rather than propagated so that the remaining automagics still run.
+
+<Warning>The order of the `automagics` list matters. An automagic that populates configuration values (e.g. `LayerStacker`) must run before one that reads those values to construct layers (e.g. `ConstructionMagic`). Always use the list returned by `automagic.available()` or preserve its order.</Warning>
+
+## Complete example
+
+The following example shows the full automagic workflow used by the Volatility 3 CLI:
+
+```python
+import volatility3.framework.contexts as contexts
+from volatility3.framework import automagic, interfaces
+from volatility3.plugins.windows import pslist
+
+# 1. Create an empty context
+ctx = contexts.Context()
+
+# 2. Set the image file location
+ctx.config["automagic.LayerStacker.single_location"] = "file:///path/to/memory.raw"
+
+# 3. Get all available automagics
+available_automagics = automagic.available(ctx)
+
+# 4. Filter to those compatible with the plugin
+selected = automagic.choose_automagic(available_automagics, pslist.PsList)
+
+# 5. Run automagics — they populate context.layers and context.symbol_space
+errors = automagic.run(selected, ctx, pslist.PsList, "plugins.PsList")
+
+# 6. Construct and run the plugin
+plugin = pslist.PsList(ctx, "plugins.PsList")
+result = plugin.run()
+```
+
+## Disabling automagic (library mode)
+
+When embedding Volatility 3 as a library, you may prefer to build the context manually rather than relying on automagic detection. Skipping automagics gives you full control over which layers and symbol tables are loaded.
+
+```python
+from volatility3.framework import contexts
+from volatility3.framework.layers import physical, intel
+from volatility3.framework.symbols import intermed
+
+ctx = contexts.Context()
+
+# Add a raw FileLayer manually
+ctx.config["base.location"] = "file:///path/to/memory.raw"
+file_layer = physical.FileLayer(ctx, "base", "base")
+ctx.layers.add_layer(file_layer)
+
+# Add an Intel translation layer with a known DTB
+ctx.config["kernel.memory_layer"] = "base"
+ctx.config["kernel.page_map_offset"] = 0x1aa000
+intel_layer = intel.Intel32e(ctx, "kernel", "kernel")
+ctx.layers.add_layer(intel_layer)
+
+# Load a symbol table directly from an ISF file
+table = intermed.IntermediateSymbolTable.create(
+    ctx, "ntkrnlmp", "windows", "ntkrnlmp"
+)
+ctx.symbol_space.append(table)
+
+# Run the plugin — no automagics needed
+plugin = pslist.PsList(ctx, "plugins.PsList")
+```
+
+<Tip>When building the context manually, use `context.layers.free_layer_name(prefix)` and `context.symbol_space.free_table_name(prefix)` to generate names that are guaranteed not to collide with existing entries.</Tip>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Framework architecture" icon="sitemap" href="/concepts/architecture">
+    Where automagic fits in the overall Volatility 3 data flow.
+  </Card>
+  <Card title="Memory layers" icon="layer-group" href="/concepts/memory-layers">
+    The layer types that LayerStacker detects and stacks.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/concepts/symbol-tables">
+    The ISF files that OS automagics locate and load.
+  </Card>
+  <Card title="Using Volatility as a library" icon="code" href="/developers/library-usage">
+    Building the context manually without the CLI or automagic.
+  </Card>
+</CardGroup>

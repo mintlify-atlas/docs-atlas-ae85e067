@@ -1,0 +1,225 @@
+---
+title: "Symbol Tables: Kernel Structure Definitions for Volatility"
+description: "How Volatility 3 locates, caches, and creates ISF JSON symbol tables for Windows, Linux, and macOS. Covers dwarf2json, pdbconv, and symbol packs."
+---
+
+Symbol tables are the bridge between raw memory bytes and meaningful OS structures. Volatility 3 uses JSON files in the Intermediate Symbol Format (ISF) to describe kernel types, offsets, and constants for each operating system version. Without a matching symbol table, most plugins cannot parse memory correctly.
+
+## How Volatility finds symbol tables
+
+Symbol table files are stored as JSON and can be in any of the following formats:
+
+| Format | Description |
+|--------|-------------|
+| `.json` | Plain JSON file |
+| `.json.gz` | gzip-compressed JSON |
+| `.json.xz` | xz-compressed JSON |
+| `.zip` | ZIP archive containing one or more JSON files |
+
+Volatility automatically decompresses files as needed. ZIP packs must be placed in the root of a symbol directory and named after the operating system they cover (e.g., `windows.zip`, `linux.zip`, `mac.zip`).
+
+The default symbol directory is `volatility3/symbols/` inside the installed package. You can add extra directories with the `-s` flag:
+
+```bash
+vol -f memory.raw -s /opt/symbols windows.pslist
+```
+
+### The symbol cache
+
+The first time Volatility scans a symbol directory it builds a cache that maps identifier strings to file paths. This cache lives at:
+
+| Platform | Default location |
+|----------|-----------------|
+| Linux / macOS (default) | `~/.cache/volatility3/` |
+| Linux / macOS (XDG) | `$XDG_CACHE_HOME/volatility3/` |
+| Windows | `%LOCALAPPDATA%\volatility3\` |
+
+The cache is updated automatically each run. If you add many new symbol files at once, the first run may take longer while the cache is rebuilt — you can safely interrupt and restart it.
+
+To force a cache rebuild, run:
+
+```bash
+vol --clear-cache windows.pslist
+```
+
+## Windows symbol tables
+
+Windows symbol tables are identified by PDB GUID and age, which Volatility reads directly from the kernel image in memory. The lookup process is:
+
+<Steps>
+  <Step title="Search locally">
+    Volatility checks all files under the `windows/` subdirectory of every configured symbol path for a file whose embedded metadata matches the PDB name and GUID/age.
+  </Step>
+  <Step title="Download from Microsoft Symbol Server">
+    If no local file matches, Volatility downloads the PDB file from Microsoft's public Symbol Server and converts it to ISF JSON automatically, then saves it to the correct location for future use.
+  </Step>
+</Steps>
+
+<Note>
+  Automatic download requires network access. Use `--offline` to disable this
+  and rely solely on local symbol files.
+</Note>
+
+### Pre-built Windows symbol packs
+
+The Volatility Foundation publishes symbol packs on GitHub Releases. Download `windows.zip` and place it in your symbols directory (or pass the directory with `-s`):
+
+```bash
+# Place in the default symbols directory
+cp windows.zip /path/to/volatility3/volatility3/symbols/
+
+# Or point to a custom directory at runtime
+vol -f memory.raw -s /opt/symbols windows.pslist
+```
+
+### Manual Windows symbol creation with pdbconv.py
+
+To convert a PDB file to ISF JSON without network access, use the `pdbconv.py` tool bundled with Volatility:
+
+```bash
+# From the top-level Volatility 3 directory
+PYTHONPATH="." python volatility3/framework/symbols/windows/pdbconv.py --help
+```
+
+If Volatility is installed into a virtual environment or system Python path, the `PYTHONPATH` prefix is not needed.
+
+## Linux symbol tables
+
+Linux symbol tables contain the kernel's OS banner string (e.g., `Linux version 5.15.0-86-generic ...`). Volatility's automagic detects the banner in the memory image and finds the matching ISF file. The match must be **exact** — down to the compilation timestamp and gcc version — because even minor kernel configuration differences can change structure layouts.
+
+<Warning>
+  Many Linux distributions strip debugging symbols from their default kernel
+  packages. You must obtain the separate debug kernel package (e.g.,
+  `linux-image-$(uname -r)-dbg` on Debian-based systems). If the distribution
+  no longer hosts that package version, analysis may not be possible.
+</Warning>
+
+### Finding the required banner
+
+Run the `banners` plugin to discover what banner string the image contains:
+
+```bash
+vol -f linux.raw banners
+```
+
+Use `isfinfo` to list all ISF files Volatility knows about and confirm whether a matching symbol file exists:
+
+```bash
+vol -f linux.raw isfinfo
+```
+
+### Generating a Linux symbol table with dwarf2json
+
+<Steps>
+  <Step title="Clone and build dwarf2json">
+    ```bash
+    git clone https://github.com/volatilityfoundation/dwarf2json
+    cd dwarf2json
+    go build
+    ```
+  </Step>
+  <Step title="Locate the debug kernel">
+    Obtain the debug kernel package for the exact banner identified in the previous step. On Debian/Ubuntu:
+
+    ```bash
+    apt-get install linux-image-$(uname -r)-dbg
+    ```
+  </Step>
+  <Step title="Convert DWARF to ISF JSON">
+    ```bash
+    dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-5.15.0-86-generic \
+      > linux-5.15.0-86-generic.json
+    ```
+
+    Adding a `System.map` file improves completeness, but the DWARF data alone usually contains the required symbol offsets:
+
+    ```bash
+    dwarf2json linux \
+      --elf /usr/lib/debug/boot/vmlinux-5.15.0-86-generic \
+      --system-map /boot/System.map-5.15.0-86-generic \
+      > linux-5.15.0-86-generic.json
+    ```
+  </Step>
+  <Step title="Install the symbol file">
+    Copy the JSON file into the `linux/` subdirectory of your symbols path:
+
+    ```bash
+    cp linux-5.15.0-86-generic.json \
+      /path/to/volatility3/volatility3/symbols/linux/
+    ```
+  </Step>
+</Steps>
+
+A helper script for automating this from package URLs is available at `development/stock-linux-json.py` in the Volatility 3 repository.
+
+## macOS symbol tables
+
+macOS symbol tables use the same banner-matching mechanism as Linux. Because there is only one macOS distribution with far fewer kernel versions, finding the right symbols is generally easier.
+
+### Generating a macOS symbol table with dwarf2json
+
+The process mirrors Linux, but use `mac` instead of `linux`:
+
+```bash
+dwarf2json mac --elf /path/to/kernel.development \
+  > macos-21.6.0.json
+
+cp macos-21.6.0.json \
+  /path/to/volatility3/volatility3/symbols/mac/
+```
+
+### Pre-built macOS symbol packs
+
+Download `mac.zip` from the Volatility Foundation GitHub Releases and place it in your symbols directory.
+
+## Offline operation
+
+If the analysis machine has no network access, pass `--offline` to prevent Volatility from attempting remote symbol downloads:
+
+```bash
+vol -f memory.raw --offline windows.pslist
+```
+
+Ensure all required symbol files are already present locally before running offline.
+
+## Symbol directory structure
+
+Volatility expects symbol files organized by OS subdirectory:
+
+```text
+symbols/
+├── windows/
+│   └── ntkrnlmp.pdb/
+│       └── <GUID+age>/
+│           └── ntkrnlmp.json.xz
+├── linux/
+│   └── linux-5.15.0-86-generic.json
+└── mac/
+    └── macos-21.6.0.json
+```
+
+ZIP packs at the root of the symbols directory are scanned automatically:
+
+```text
+symbols/
+├── windows.zip
+├── linux.zip
+└── mac.zip
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="vol CLI" icon="terminal" href="/using/cli">
+    Use `-s` to point Volatility at custom symbol directories at runtime.
+  </Card>
+  <Card title="Symbol tables concept" icon="book" href="/concepts/symbol-tables">
+    Deep dive into the ISF format, type hierarchies, and how plugins consume symbols.
+  </Card>
+  <Card title="Windows tutorial" icon="windows" href="/tutorials/windows">
+    End-to-end Windows analysis walkthrough including symbol setup.
+  </Card>
+  <Card title="Linux tutorial" icon="linux" href="/tutorials/linux">
+    Linux analysis walkthrough with symbol generation steps.
+  </Card>
+</CardGroup>

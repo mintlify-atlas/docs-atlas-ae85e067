@@ -1,0 +1,480 @@
+---
+title: "Plugin Requirements Reference"
+description: "Complete reference for every Volatility 3 requirement type: purpose, constructor parameters, and examples for both simple and complex requirements."
+---
+
+Volatility 3 plugins declare their dependencies through a requirements system. Each requirement is an object that describes something the plugin needs — a memory layer, a symbol table, a user-supplied string, an integer — before it can run. This page documents every built-in requirement type, its parameters, and how to access the value it provides inside `run()`.
+
+## How requirements work
+
+`get_requirements()` returns a list of requirement objects. When a plugin is invoked, the framework walks that list and checks the context's configuration tree to see whether each requirement is satisfied. Simple requirements (strings, integers, booleans, etc.) are presented to the user as command-line options. Complex requirements (modules, layers, symbol tables) are typically filled in by automagic, not the user.
+
+Once all requirements are satisfied, your plugin is instantiated and `run()` is called. Every requirement value is available through `self.config`:
+
+```python
+def run(self):
+    kernel_name = self.config["kernel"]   # value of a ModuleRequirement
+    pid_list    = self.config["pid"]      # value of a ListRequirement
+    verbosity   = self.config["verbose"]  # value of a BooleanRequirement
+```
+
+Optional requirements that were not supplied default to the `default` parameter value (or `None` if no default was given).
+
+---
+
+## Simple requirements
+
+Simple requirements correspond to scalar values that users supply directly.
+
+### StringRequirement
+
+A single Unicode string value.
+
+<ParamField path="body.name" type="string" required>
+  The configuration key used in `self.config` and on the command line.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text displayed to the user.
+</ParamField>
+
+<ParamField path="body.default" type="string" default="None">
+  Value used when the requirement is optional and not supplied.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  When `True`, the plugin can run without this value being provided.
+</ParamField>
+
+```python
+requirements.StringRequirement(
+    name="output_file",
+    description="Path to write output",
+    optional=True,
+)
+```
+
+Access: `self.config["output_file"]`
+
+---
+
+### IntRequirement
+
+A single integer value.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text displayed to the user.
+</ParamField>
+
+<ParamField path="body.default" type="number" default="None">
+  Default value when optional and not supplied.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without this value.
+</ParamField>
+
+```python
+requirements.IntRequirement(
+    name="count",
+    description="Maximum number of results to return",
+    default=50,
+    optional=True,
+)
+```
+
+Access: `self.config["count"]`
+
+---
+
+### BooleanRequirement
+
+A `True` / `False` flag.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text displayed to the user.
+</ParamField>
+
+<ParamField path="body.default" type="boolean" default="False">
+  Default value when optional and not supplied.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without this value.
+</ParamField>
+
+```python
+requirements.BooleanRequirement(
+    name="include_threads",
+    description="Include thread information in output",
+    default=False,
+    optional=True,
+)
+```
+
+Access: `self.config["include_threads"]`
+
+---
+
+### FloatRequirement
+
+A single floating-point value.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.default" type="number" default="None">
+  Default value when optional and not supplied.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without this value.
+</ParamField>
+
+```python
+requirements.FloatRequirement(
+    name="threshold",
+    description="Confidence threshold between 0.0 and 1.0",
+    default=0.5,
+    optional=True,
+)
+```
+
+Access: `self.config["threshold"]`
+
+---
+
+### ListRequirement
+
+A list of values of a single simple type.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.element_type" type="type" required>
+  The Python type of each element: `int`, `str`, `bool`, or `bytes`.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  When `True`, the plugin can run with an empty or absent list.
+</ParamField>
+
+<ParamField path="body.min_elements" type="number" default="0">
+  Minimum number of elements required.
+</ParamField>
+
+<ParamField path="body.max_elements" type="number" default="0">
+  Maximum number of elements allowed. `0` means unlimited.
+</ParamField>
+
+```python
+requirements.ListRequirement(
+    name="pid",
+    element_type=int,
+    description="Process IDs to include (all other processes are excluded)",
+    optional=True,
+)
+```
+
+Access: `self.config["pid"]` returns a Python list, or an empty list if not supplied and the requirement is optional.
+
+---
+
+### ChoiceRequirement
+
+A string that must be one of a fixed set of options.
+
+<ParamField path="body.choices" type="string[]" required>
+  The list of accepted string values.
+</ParamField>
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without a choice being made.
+</ParamField>
+
+```python
+requirements.ChoiceRequirement(
+    choices=["raw", "json", "csv"],
+    name="format",
+    description="Output format",
+)
+```
+
+Access: `self.config["format"]`
+
+---
+
+### URIRequirement
+
+A string that is a valid URI or file path. The framework normalises plain file paths into `file://` URIs automatically.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without a URI being provided.
+</ParamField>
+
+```python
+requirements.URIRequirement(
+    name="dump_path",
+    description="URI or file path to write extracted PE files",
+    optional=True,
+)
+```
+
+Access: `self.config["dump_path"]` returns the normalised `file://` or other URI string.
+
+---
+
+## Complex requirements
+
+Complex requirements are filled in by Volatility's automagic system rather than the user. Users rarely need to supply values for them manually.
+
+### ModuleRequirement
+
+Requests a kernel (or other) module: a named object in `context.modules` that bundles a translation layer, a symbol table, and the module's load offset. This is the standard way to request the Windows or Linux kernel in a plugin.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key. The resulting module name is stored here and read back as `self.config["kernel"]`.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.architectures" type="string[]">
+  Filter by architecture. Accepted values: `"Intel32"`, `"Intel64"`. Leave empty to accept any architecture.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without a module being provided.
+</ParamField>
+
+```python
+requirements.ModuleRequirement(
+    name="kernel",
+    description="Windows kernel",
+    architectures=["Intel32", "Intel64"],
+)
+```
+
+Access: `self.context.modules[self.config["kernel"]]`
+
+The module exposes `.layer_name` and `.symbol_table_name` so you can access the underlying layer and symbols without reading their names from configuration directly.
+
+<Note>
+`ModuleRequirement` automatically includes a `TranslationLayerRequirement` and a `SymbolTableRequirement` as sub-requirements. You do not need to declare them separately unless you need a layer or symbol table independent of any module.
+</Note>
+
+---
+
+### TranslationLayerRequirement
+
+Requests a named translation layer (virtual address space) in `context.layers`. Use this when you need direct access to a memory layer without the module abstraction.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.architectures" type="string[]">
+  Restrict to `"Intel32"` or `"Intel64"`.
+</ParamField>
+
+<ParamField path="body.oses" type="string[]">
+  Restrict by OS metadata on the layer.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without this layer.
+</ParamField>
+
+```python
+requirements.TranslationLayerRequirement(
+    name="primary",
+    description="Memory layer for the kernel",
+    architectures=["Intel32", "Intel64"],
+)
+```
+
+Access: `self.context.layers[self.config["primary"]]`
+
+<Note>
+In current Volatility 3, prefer `ModuleRequirement` over declaring separate `TranslationLayerRequirement` and `SymbolTableRequirement`. The standalone requirements still exist and work, but `ModuleRequirement` is the recommended pattern for most plugins.
+</Note>
+
+---
+
+### SymbolTableRequirement
+
+Requests a named symbol table in `context.symbol_space`. Automagic detects the OS and kernel version and loads the matching ISF (Intermediate Symbol Format) file.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key.
+</ParamField>
+
+<ParamField path="body.description" type="string">
+  Help text.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  Allow the plugin to run without a symbol table.
+</ParamField>
+
+```python
+requirements.SymbolTableRequirement(
+    name="nt_symbols",
+    description="Windows kernel symbols",
+)
+```
+
+Access: `self.context.symbol_space[self.config["nt_symbols"]]`
+
+---
+
+## Version and dependency requirements
+
+### VersionRequirement
+
+Asserts that a specific plugin or framework component is present at a compatible version. This requirement does **not** store or expose a configuration value — it only acts as a guard that prevents your plugin from running if the dependency version check fails.
+
+<ParamField path="body.name" type="string" required>
+  Configuration key (used internally; not exposed to users).
+</ParamField>
+
+<ParamField path="body.component" type="class" required>
+  The class to check. Must be a subclass of `VersionableInterface` (all `PluginInterface` subclasses qualify).
+</ParamField>
+
+<ParamField path="body.version" type="tuple" required>
+  Required version as `(major, minor, patch)`. Compatibility follows SemVer: the component's major version must match, and its minor version must be equal or higher.
+</ParamField>
+
+<ParamField path="body.optional" type="boolean" default="False">
+  When `True`, the check is advisory and does not block execution.
+</ParamField>
+
+```python
+from volatility3.plugins.windows import pslist
+
+requirements.VersionRequirement(
+    name="pslist",
+    component=pslist.PsList,
+    version=(2, 0, 0),
+)
+```
+
+No `self.config` access needed — the check runs at instantiation time.
+
+---
+
+### PluginRequirement
+
+<Warning>
+`PluginRequirement` is deprecated and will be removed on or after 2026-06-01. Use `VersionRequirement` with `component=` instead of `plugin=`.
+</Warning>
+
+The legacy way to declare a dependency on another plugin. Internally it delegates to `VersionRequirement`.
+
+```python
+# Deprecated — use VersionRequirement instead
+requirements.PluginRequirement(
+    name="pslist",
+    plugin=pslist.PsList,
+    version=(2, 0, 0),
+)
+```
+
+---
+
+## Optional requirements and defaults
+
+Mark any requirement `optional=True` to allow the plugin to run without it. When the requirement is not supplied, `self.config["name"]` returns the `default` value you specified, or `None` if no default was set.
+
+```python
+requirements.IntRequirement(
+    name="max_depth",
+    description="Maximum recursion depth",
+    default=5,
+    optional=True,
+)
+```
+
+In `run()`:
+
+```python
+max_depth = self.config.get("max_depth", 5)  # or rely on the default= parameter
+```
+
+<Tip>
+The framework automatically writes the `default` value into `self.config` at plugin instantiation time, so `self.config["max_depth"]` already returns `5` without needing a fallback in `self.config.get()`.
+</Tip>
+
+---
+
+## Accessing requirement values
+
+All requirement values are available through the `self.config` mapping using the requirement's `name`:
+
+```python
+def run(self):
+    # Complex requirements — access objects from context
+    kernel   = self.context.modules[self.config["kernel"]]
+    layer    = self.context.layers[kernel.layer_name]
+    symbols  = self.context.symbol_space[kernel.symbol_table_name]
+
+    # Simple requirements — direct values
+    pid_list = self.config["pid"]           # list[int]
+    verbosity = self.config["verbose"]      # bool
+    output   = self.config["output_file"]   # str or None
+```
+
+The configuration path uses `.` as a separator internally. When you call `self.config["kernel"]` you are reading the value at the full path `<plugin_config_path>.kernel`.
+
+---
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Plugin basics" icon="book-open" href="/developers/plugin-basics">
+    Step-by-step guide to writing your first plugin, including how to use requirements in practice.
+  </Card>
+  <Card title="Advanced plugin patterns" icon="puzzle-piece" href="/developers/plugin-advanced">
+    Versioning strategy, VersionRequirement, and how automagic populates ModuleRequirement.
+  </Card>
+</CardGroup>

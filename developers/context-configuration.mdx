@@ -1,0 +1,184 @@
+---
+title: "Context and Configuration in Volatility 3"
+description: "Learn how the Context object works, how to navigate the hierarchical configuration tree, and how to load and query plugins programmatically."
+---
+
+Volatility 3 centralises all forensics session state in a single `Context` object. This page explains what a context contains, how the hierarchical configuration tree is structured, how to load and enumerate plugins, and how to verify that a plugin's requirements are fully satisfied before running it.
+
+## What is a Context?
+
+A `Context` is the primary carrier of state throughout a Volatility 3 session. It holds three core things:
+
+- **Layers** (`context.layers`) — a container of data and translation layers that represent physical and virtual memory.
+- **Symbol space** (`context.symbol_space`) — a namespace of symbol tables used to interpret raw memory bytes as typed structures.
+- **Configuration tree** (`context.config`) — a hierarchical key-value store where all plugin and layer parameters are stored.
+
+A context is **not** a singleton. You can create multiple independent contexts and operate them in parallel without any shared state:
+
+```python
+from volatility3.framework import contexts
+
+ctx = contexts.Context()
+```
+
+Once a context is passed to a plugin, every object created by that plugin carries a reference back to it. Take care to use the correct context when building multi-context pipelines.
+
+## The configuration tree
+
+`context.config` is a `HierarchicalDict` — a dictionary that understands dot-separated paths as a tree of nested keys, similar to the Windows registry. Setting a value at `"plugins.PsList.kernel"` implicitly creates the `plugins` and `PsList` subtrees.
+
+### Path structure
+
+By convention, plugin configuration lives under the `plugins` base path:
+
+```
+plugins
+└── <PluginClassName>
+    ├── <param_name>
+    └── <sub_component>
+        └── <sub_param>
+```
+
+For example, for the `windows.pslist.PsList` plugin:
+
+```
+plugins.PsList.kernel
+plugins.PsList.single_location
+```
+
+### Building paths with `path_join`
+
+Always construct configuration paths with `path_join` rather than string concatenation. This function uses the correct internal separator and will continue to work if it ever changes:
+
+```python
+from volatility3.framework.interfaces.configuration import path_join
+
+base_config_path = "plugins"
+config_key = path_join(base_config_path, "PsList", "single_location")
+# Result: "plugins.PsList.single_location"
+```
+
+### Setting values
+
+Assign values to the configuration tree using standard dictionary syntax:
+
+```python
+ctx.config[path_join(base_config_path, plugin.__name__, "single_location")] = (
+    "file:///path/to/memory.raw"
+)
+```
+
+Values can also be read back with `ctx.config[key]` or `ctx.config.get(key, default)`.
+
+## Verifying the interface version
+
+Before using the framework in your application, check that the installed version is compatible with the API your code requires:
+
+```python
+import volatility3.framework
+
+volatility3.framework.require_interface_version(2, 0, 0)
+```
+
+The framework uses semantic versioning. A requirement of `(2, 0, 0)` is satisfied by any installed version `>= 2.0` with the same major number. If the check fails, a `RuntimeError` is raised immediately.
+
+## Loading plugins
+
+Plugins are discovered at runtime by walking the `volatility3.plugins` module path. Call `import_files` to load all plugins found under that namespace:
+
+```python
+import volatility3.plugins
+from volatility3 import framework
+
+failures = framework.import_files(volatility3.plugins, True)
+```
+
+The second argument controls error handling:
+
+| Value   | Behaviour                                                       |
+|---------|-----------------------------------------------------------------|
+| `True`  | Swallow import errors; return them as a list of module names.   |
+| `False` | Raise the first import error encountered.                       |
+
+### Adding custom plugin directories
+
+Append your own plugin directories to the module's `__path__` attribute **before** calling `import_files`. Always preserve the built-in paths found in `constants.PLUGINS_PATH`:
+
+```python
+from volatility3.framework import constants
+
+volatility3.plugins.__path__ = ["/path/to/my/plugins"] + list(constants.PLUGINS_PATH)
+failures = framework.import_files(volatility3.plugins, True)
+```
+
+<Note>
+  Only ever import plugins from the `volatility3.plugins` namespace, never from `volatility3.framework.plugins` directly. Using the public namespace allows users to override built-in plugins without write access to the framework installation.
+</Note>
+
+## Listing available plugins
+
+After loading, retrieve a dictionary of `{plugin_name: PluginClass}` pairs:
+
+```python
+plugin_list = framework.list_plugins()
+
+for name, cls in plugin_list.items():
+    print(name, cls)
+```
+
+Plugin names follow the convention `<os>.<module>.<ClassName>` — for example, `windows.pslist.PsList` or `linux.bash.Bash`.
+
+## Querying plugin requirements
+
+Every plugin class exposes its required inputs via `get_requirements()`:
+
+```python
+plugin = plugin_list["windows.pslist.PsList"]
+
+for req in plugin.get_requirements():
+    print(
+        f"  {req.name:30s}  optional={req.optional}  type={type(req).__name__}"
+    )
+```
+
+Requirement types fall into two categories:
+
+<CardGroup cols={2}>
+  <Card title="Simple type requirements" icon="input-text">
+    Integers, booleans, floats, and strings. These map directly to scalar configuration values.
+  </Card>
+  <Card title="Complex requirements" icon="layer-group">
+    Lists, choices, multi-requirements, translation layer requirements, and symbol table requirements. These often require automagic or manual layer construction to fulfil.
+  </Card>
+</CardGroup>
+
+Some requirements are optional (`req.optional == True`); others are mandatory. Optional requirements have sensible defaults and do not block plugin execution if unset.
+
+## Checking unsatisfied requirements
+
+Before instantiating a plugin, verify that every mandatory requirement has been met:
+
+```python
+from volatility3.framework.interfaces.configuration import path_join
+
+plugin_config_path = path_join("plugins", plugin.__name__)
+unsatisfied = plugin.unsatisfied(ctx, plugin_config_path)
+
+if unsatisfied:
+    for path, req in unsatisfied.items():
+        print(f"Missing: {path} ({type(req).__name__})")
+```
+
+`unsatisfied` returns an empty dict when the plugin is ready to run, or a dict of `{config_path: RequirementInterface}` entries for anything still missing. Running automagic (see [Using Volatility 3 as a Library](/developers/library-usage)) before this check will typically satisfy translation layer and symbol table requirements automatically.
+
+## Base config path convention
+
+The `base_config_path` value (`"plugins"` by default) is a namespace prefix under which plugin configurations are stored. Plugins are then instantiated at `base_config_path/<PluginClassName>`. Using a consistent prefix ensures that automagic, plugins, and layers all look for their configuration in the same location:
+
+```python
+base_config_path = "plugins"
+plugin_config_path = path_join(base_config_path, plugin.__name__)
+# e.g. "plugins.PsList"
+```
+
+Automagic modules are configured separately under `constants.AUTOMAGIC_CONFIG_PATH` (usually `"automagic"`), so there is no collision between the two namespaces.

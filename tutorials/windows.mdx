@@ -1,0 +1,258 @@
+---
+title: "Windows Memory Forensics with Volatility 3"
+description: "Analyze Windows memory images with Volatility 3: process lists, network connections, registry hives, malware detection, and driver analysis."
+---
+
+Windows memory forensics with Volatility 3 lets you inspect a captured memory image to recover process activity, network state, registry data, loaded drivers, and signs of malicious code — all without running code on the live system. This page walks you through acquiring a memory image, verifying it works, and using the key Windows plugins.
+
+## Acquiring memory
+
+Volatility 3 analyzes memory images; it does not capture memory itself. Use one of these tools to acquire a Windows memory image before starting:
+
+- **[WinPmem](https://github.com/Velocidex/WinPmem/releases/latest)** — open-source, actively maintained
+- **[FTK Imager](https://accessdata.com/product-download/ftk-imager-version-4-5)** — commercial tool with a free tier
+
+## Verifying the image
+
+Before running analysis plugins, confirm Volatility 3 can read the image and identify the Windows version:
+
+```bash
+vol -f <image> windows.info
+```
+
+<Note>
+Windows symbol tables (ISF files) are generated automatically from PDB files downloaded from Microsoft's symbol servers. You do not need to locate or provide ISF files manually for most Windows images.
+</Note>
+
+## Getting help for a plugin
+
+Every plugin accepts `-h` to print its options and output column descriptions:
+
+```bash
+vol windows.pslist -h
+```
+
+## Key plugins
+
+### Process analysis
+
+<Steps>
+  <Step title="List running processes">
+    `windows.pslist` walks the kernel's `EPROCESS` doubly-linked list and prints one row per process.
+
+    ```bash
+    vol -f <image> windows.pslist
+    ```
+
+    Output columns: `PID`, `PPID`, `ImageFileName`, `Offset(V)`, `Threads`, `Handles`, `SessionId`, `Wow64`, `CreateTime`, `ExitTime`, `File output`
+
+    ```
+    PID    PPID   ImageFileName   Offset(V)         Threads  Handles  SessionId  Wow64  CreateTime
+    4      0      System          0xfa8000cbc040     85       492      N/A        False  2022-02-07 16:30:12
+    276    4      smss.exe        0xfa8001e04040     2        29       N/A        False  2022-02-07 16:30:12
+    352    336    csrss.exe       0xfa8002110b30     9        375      0          False  2022-02-07 16:30:13
+    404    336    wininit.exe     0xfa800219f060     3        74       0          False  2022-02-07 16:30:13
+    ```
+
+    Filter by one or more PIDs using `--pid`:
+
+    ```bash
+    vol -f <image> windows.pslist --pid 404 1234
+    ```
+  </Step>
+
+  <Step title="View the process tree">
+    `windows.pstree` displays the same process list formatted as a parent-child hierarchy. Child processes are prefixed with `*` characters indicating their depth.
+
+    ```bash
+    vol -f <image> windows.pstree
+    ```
+
+    Output columns: `PID`, `PPID`, `ImageFileName`, `Offset(V)`, `Threads`, `Handles`, `SessionId`, `Wow64`, `CreateTime`, `ExitTime`
+
+    ```
+    PID   PPID  ImageFileName  Offset(V)
+    4     0     System         0xfa8000cbc040
+    * 276 4     smss.exe       0xfa8001e04040
+    504   404   services.exe   0xfa80022ccb30
+    ** 960 504  svchost.exe    0xfa8001c17b30
+    ```
+  </Step>
+
+  <Step title="Inspect process command lines">
+    `windows.cmdline` reads the process environment block (PEB) for each process and returns the full command line used to launch it.
+
+    ```bash
+    vol -f <image> windows.cmdline
+    ```
+
+    Output columns: `PID`, `Process`, `Args`
+
+    Filter by PID:
+
+    ```bash
+    vol -f <image> windows.cmdline --pid 1234
+    ```
+  </Step>
+
+  <Step title="List loaded DLLs">
+    `windows.dlllist` enumerates the DLLs loaded into each process's address space via the PEB loader data.
+
+    ```bash
+    vol -f <image> windows.dlllist
+    ```
+
+    Output columns: `PID`, `Process`, `Base`, `Size`, `Name`, `Path`, `LoadCount`, `LoadTime`, `File output`
+
+    Filter to a specific process:
+
+    ```bash
+    vol -f <image> windows.dlllist --pid 1234
+    ```
+  </Step>
+</Steps>
+
+### Network analysis
+
+<CardGroup cols={2}>
+  <Card title="windows.netscan" icon="magnifying-glass">
+    Scans physical memory for network socket and connection structures, including closed connections that may still reside in memory.
+
+    ```bash
+    vol -f <image> windows.netscan
+    ```
+
+    Columns: `Offset`, `Proto`, `LocalAddr`, `LocalPort`, `ForeignAddr`, `ForeignPort`, `State`, `PID`, `Owner`, `Created`
+  </Card>
+  <Card title="windows.netstat" icon="network-wired">
+    Walks the kernel's active connection list. Reports only connections present in the active network state at dump time.
+
+    ```bash
+    vol -f <image> windows.netstat
+    ```
+
+    Columns: `Offset`, `Proto`, `LocalAddr`, `LocalPort`, `ForeignAddr`, `ForeignPort`, `State`, `PID`, `Owner`, `Created`
+  </Card>
+</CardGroup>
+
+<Tip>
+Use `windows.netscan` first. It finds more connections because it scans all of physical memory rather than walking a single list. Follow up with `windows.netstat` for corroboration.
+</Tip>
+
+### Malware detection
+
+**`windows.malfind`** scans VAD (Virtual Address Descriptor) entries for memory regions that are executable, not backed by a file on disk, and contain code-like content. These are common characteristics of process injection and shellcode.
+
+```bash
+vol -f <image> windows.malfind
+```
+
+Output columns: `PID`, `Process`, `Start VPN`, `End VPN`, `Tag`, `Protection`, `CommitCharge`, `PrivateMemory`, `File output`, `Notes`, `Hexdump`, `Disasm`
+
+```bash
+# Narrow to a specific process
+vol -f <image> windows.malfind --pid 1234
+```
+
+<Warning>
+`windows.malfind` produces false positives, particularly for JIT-compiled code in browsers and runtimes. Always verify flagged regions with additional context before drawing conclusions.
+</Warning>
+
+### File and handle analysis
+
+<CardGroup cols={2}>
+  <Card title="windows.filescan" icon="file">
+    Scans pool memory for `FILE_OBJECT` structures, recovering file references even from terminated processes.
+
+    ```bash
+    vol -f <image> windows.filescan
+    ```
+
+    Columns: `Offset`, `Name`
+  </Card>
+  <Card title="windows.handles" icon="hand">
+    Lists open handles (files, registry keys, events, mutants, and more) for each process.
+
+    ```bash
+    vol -f <image> windows.handles
+    ```
+
+    Columns: `PID`, `Process`, `Offset`, `HandleValue`, `Type`, `GrantedAccess`, `Name`
+  </Card>
+</CardGroup>
+
+### Registry analysis
+
+<Steps>
+  <Step title="List registry hives">
+    `windows.registry.hivelist` enumerates all registry hives loaded in memory, including the path to each hive's backing file.
+
+    ```bash
+    vol -f <image> windows.registry.hivelist
+    ```
+
+    Output columns: `Offset`, `FileFullPath`, `File output`
+  </Step>
+
+  <Step title="Inspect registry keys">
+    `windows.registry.printkey` prints the values and subkeys for a specific registry key path. Use `--key` to specify the key.
+
+    ```bash
+    vol -f <image> windows.registry.printkey --key "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    ```
+
+    Output columns: `Last Write Time`, `Hive Offset`, `Type`, `Key`, `Name`, `Data`, `Volatile`
+
+    Use `--recurse` to walk the full subtree beneath the specified key.
+  </Step>
+</Steps>
+
+### Services and drivers
+
+<CardGroup cols={2}>
+  <Card title="windows.svcscan" icon="gears">
+    Scans for Windows service records in memory, including stopped and deleted services that are no longer visible in the SCM.
+
+    ```bash
+    vol -f <image> windows.svcscan
+    ```
+
+    Columns: `Offset`, `Order`, `PID`, `Start`, `State`, `Type`, `Name`, `Display`, `Binary`, `Binary (Registry)`, `Dll`
+  </Card>
+  <Card title="windows.driverirp" icon="microchip">
+    Lists each driver's IRP (I/O Request Packet) handler function addresses. Handlers pointing outside the driver's own module are a common rootkit indicator.
+
+    ```bash
+    vol -f <image> windows.driverirp
+    ```
+
+    Columns: `Offset`, `Driver Name`, `IRP`, `Address`, `Module`, `Symbol`
+  </Card>
+</CardGroup>
+
+### Crash dump metadata
+
+`windows.crashinfo` reads the header of a Windows crash dump (`.dmp`) file and extracts metadata about the system state at the time of the crash. This plugin requires a crash dump image, not a raw memory image.
+
+```bash
+vol -f <image>.dmp windows.crashinfo
+```
+
+Output columns: `Signature`, `MajorVersion`, `MinorVersion`, `DirectoryTableBase`, `PfnDataBase`, `PsLoadedModuleList`, `PsActiveProcessHead`, `MachineImageType`, `NumberProcessors`, `KdDebuggerDataBlock`, `DumpType`, `SystemUpTime`, `Comment`, `SystemTime`
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Linux memory forensics" icon="linux" href="/tutorials/linux">
+    Analyze Linux memory images with process, network, and kernel module plugins.
+  </Card>
+  <Card title="macOS memory forensics" icon="apple" href="/tutorials/mac">
+    Analyze macOS memory images with Volatility 3.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/using/symbol-tables">
+    Learn how Volatility 3 uses ISF symbol tables to interpret memory structures.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/using/cli">
+    Full reference for Volatility 3 command-line options and flags.
+  </Card>
+</CardGroup>

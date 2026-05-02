@@ -1,81 +1,187 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get Started with Volatility 3: Your First Analysis"
+description: "Run your first Volatility 3 memory analysis: install the tool, acquire a memory image, and use core plugins to inspect processes and network connections."
 ---
 
-## Get started in three steps
+This page walks you through your first Volatility 3 analysis from start to finish. You will install Volatility 3, obtain a memory image, confirm the image is supported, and run several plugins to extract artifacts from it.
 
-Get your documentation site running locally and make your first customization.
+## Before you begin
 
-### Step 1: Set up your local environment
+Make sure Python 3.8 or later is installed on your system. If you have not installed Volatility 3 yet, start here:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Card title="Install Volatility 3" icon="download" href="/installation">
+  Full install instructions including pip, development install, and symbol tables.
+</Card>
 
-### Step 2: Deploy your changes
+## Run your first analysis
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Install Volatility 3">
+    ```bash
+    pip install volatility3
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    After installation, `vol` is available as a command:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    vol --help
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="Acquire a memory image">
+    Volatility 3 does not capture memory itself. You need a raw memory image from a target system.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    Common acquisition tools:
 
-## Next steps
+    | Platform | Tool |
+    |----------|------|
+    | Windows | [WinPmem](https://github.com/Velocidex/WinPmem/releases/latest), [FTK Imager](https://accessdata.com/product-download/ftk-imager-version-4-5) |
+    | Linux | [AVML](https://github.com/microsoft/avml) |
+    | macOS | [osxpmem](https://github.com/google/rekall/releases) |
 
-Now that you have your docs running, explore these key features:
+    For practice, many CTF-published memory dumps are compatible with Volatility 3. Once you have an image, note its path — for example, `/home/user/samples/memory.vmem`.
+  </Step>
+
+  <Step title="Verify the image with windows.info">
+    Before running analysis plugins, confirm that Volatility 3 can identify the image. For a Windows image, run `windows.info`:
+
+    ```bash
+    vol -f /home/user/samples/memory.vmem windows.info
+    ```
+
+    If the image is recognized, you will see metadata about the Windows installation:
+
+    ```text
+    Volatility 3 Framework 2.x.x   PDB scanning finished
+
+    Variable                    Value
+    Kernel Base                 0xf80002a48000
+    DTB                         0x187000
+    Symbols                     ntkrnlmp.pdb/...
+    Is64Bit                     True
+    IsPAE                       False
+    primary 0 WindowsIntelAMD64 -
+    memory_layer 0 FileLayer    /home/user/samples/memory.vmem
+    KdVersionBlock              0xf80002c92d28
+    Major/Minor                 15.7601
+    MachineType                 34404
+    KeNumberProcessors          1
+    SystemTime                  2022-02-07 16:30:12
+    NtSystemRoot                C:\Windows
+    NtProductType               NtProductWinNt
+    NtMajorVersion              6
+    NtMinorVersion              1
+    ```
+
+    <Note>
+    For Windows images, symbol tables are generated automatically from Microsoft's PDB symbol server on first run. This may take a moment.
+    </Note>
+  </Step>
+
+  <Step title="List running processes">
+    `windows.pslist` enumerates all processes that were running at the time of the memory capture:
+
+    ```bash
+    vol -f /home/user/samples/memory.vmem windows.pslist
+    ```
+
+    Sample output:
+
+    ```text
+    Volatility 3 Framework 2.x.x   PDB scanning finished
+
+    PID     PPID    ImageFileName   Offset(V)       Threads Handles SessionId   Wow64   CreateTime              ExitTime    File output
+
+    4       0       System          0xfa8000cbc040  85      492     N/A         False   2022-02-07 16:30:12     N/A         Disabled
+    276     4       smss.exe        0xfa8001e04040  2       29      N/A         False   2022-02-07 16:30:12     N/A         Disabled
+    352     336     csrss.exe       0xfa8002110b30  9       375     0           False   2022-02-07 16:30:13     N/A         Disabled
+    404     336     wininit.exe     0xfa800219f060  3       74      0           False   2022-02-07 16:30:13     N/A         Disabled
+    412     396     csrss.exe       0xfa80021c5b30  9       224     1           False   2022-02-07 16:30:13     N/A         Disabled
+    468     396     winlogon.exe    0xfa8002284060  5       113     1           False   2022-02-07 16:30:14     N/A         Disabled
+    ```
+
+    Each row shows the process ID (PID), parent PID (PPID), executable name, memory offset, and timestamps.
+  </Step>
+
+  <Step title="Scan for network connections">
+    `windows.netscan` finds active and recently closed network connections in the image:
+
+    ```bash
+    vol -f /home/user/samples/memory.vmem windows.netscan
+    ```
+
+    Sample output:
+
+    ```text
+    Offset      Proto   LocalAddr       LocalPort   ForeignAddr     ForeignPort State       PID     Owner       Created
+
+    0x13e057300 TCPv4   192.168.1.5     49223       93.184.216.34   80          ESTABLISHED 1234    chrome.exe  2022-02-07 16:35:01
+    0x13e123a80 TCPv4   0.0.0.0         445         0.0.0.0         0           LISTENING   4       System      2022-02-07 16:30:14
+    ```
+
+    Look for unexpected connections to external IPs or unusual listening ports as indicators of compromise.
+  </Step>
+</Steps>
+
+## Useful flags
+
+| Flag | Description |
+|------|-------------|
+| `-f` / `--file` | Path to the memory image (shorthand for `--single-location`) |
+| `-r` / `--renderer` | Output format: `quick` (default), `pretty`, `json`, `jsonl`, `csv` |
+| `-o` / `--output-dir` | Directory where plugin-generated files are saved |
+| `-p` / `--plugin-dirs` | Load plugins from an additional directory |
+| `-q` / `--quiet` | Suppress progress messages |
+
+<Tip>
+Run `vol -h` to see all global options. Run `vol <plugin> -h` to see options specific to a plugin — for example, `vol windows.pslist -h`.
+</Tip>
+
+## More plugins to try
 
 <CardGroup cols={2}>
+  <Card title="windows.pstree" icon="sitemap">
+    Display parent-child relationships between processes as a tree. Useful for spotting injected or orphaned processes.
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    ```bash
+    vol -f memory.vmem windows.pstree
+    ```
+  </Card>
+  <Card title="windows.cmdline" icon="terminal">
+    Show the command-line arguments each process was launched with. Useful for identifying malicious invocations.
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    ```bash
+    vol -f memory.vmem windows.cmdline
+    ```
+  </Card>
+  <Card title="windows.dlllist" icon="list">
+    List DLLs loaded by each process. Look for DLLs loaded from unexpected paths.
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    ```bash
+    vol -f memory.vmem windows.dlllist
+    ```
+  </Card>
+  <Card title="windows.registry.hashdump" icon="key">
+    Extract NTLM password hashes from the SAM hive in memory.
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+    ```bash
+    vol -f memory.vmem windows.registry.hashdump
+    ```
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## OS-specific tutorials
+
+For deeper walkthroughs using real memory dumps, see the OS-specific tutorials:
+
+<CardGroup cols={3}>
+  <Card title="Windows tutorial" icon="windows" href="/tutorials/windows">
+    Process lists, DLL analysis, network scanning, and hash extraction.
+  </Card>
+  <Card title="Linux tutorial" icon="linux" href="/tutorials/linux">
+    Process trees, bash history, kernel modules, and malware detection.
+  </Card>
+  <Card title="macOS tutorial" icon="apple" href="/tutorials/mac">
+    Mach-O structures, kernel extensions, and BSD process info.
+  </Card>
+</CardGroup>

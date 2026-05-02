@@ -1,0 +1,318 @@
+---
+title: "Objects API: Structured Memory Access in Volatility 3"
+description: "Reference for Volatility 3's objects API — Templates, ObjectInterface, native types, member access, casting, and reading objects from a context."
+---
+
+The Volatility 3 objects API provides structured, Pythonic access to interpreted values read from a memory layer. Rather than working with raw byte arrays, you construct typed objects on top of a layer at a specific offset. This page covers the `Template` and `ObjectInterface` classes defined in `volatility3.framework.interfaces.objects`, explains native types, and shows how to read and navigate objects in practice.
+
+## Templates vs objects
+
+Volatility 3 cleanly separates *schema* from *data*:
+
+<CardGroup cols={2}>
+  <Card title="Template" icon="file-code">
+    A `Template` describes the shape of an object — its size, its members, and their types — without being bound to any memory location. A template is like a class definition: it can tell you the size of `_EPROCESS` or the offset of its `ActiveProcessLinks` member, but it holds no live data. Templates live in symbol tables and are reused across many instantiations.
+  </Card>
+  <Card title="ObjectInterface" icon="cube">
+    An `ObjectInterface` (or just "object") is a template instantiated at a specific `offset` on a specific `layer`. When an object is constructed, its data is read from the layer once and stored. Accessing a member later does not trigger a second read. Objects are Python values: integers are real Python `int` instances, floats are real Python `float` instances.
+  </Card>
+</CardGroup>
+
+<Note>
+In Volatility 2, accessing a member would re-read from the underlying address space on every access. Volatility 3 reads data once at construction time. If the memory you are analysing may have changed, you must reconstruct the object explicitly.
+</Note>
+
+## Template
+
+`Template` is defined in `volatility3/framework/interfaces/objects.py`. It acts as a callable factory: calling a template with a `context` and `ObjectInformation` constructs the corresponding object.
+
+### Properties
+
+<ResponseField name="vol" type="ReadOnlyMapping">
+  A read-only mapping exposing the template's keyword arguments, including `type_name`, `size`, and any type-specific fields (e.g. `data_format` for primitives, `members` for structs).
+</ResponseField>
+
+<ResponseField name="size" type="int">
+  The size of the object in bytes. Abstract; implemented by each concrete template subclass.
+</ResponseField>
+
+<ResponseField name="children" type="list[Template]">
+  Child templates (member types, sub-types, and base types). Used internally to traverse and resolve type graphs.
+</ResponseField>
+
+### Useful methods
+
+<ParamField path="clone" type="method">
+  Return a shallow copy of the template as originally constructed, without any `update_vol` additions.
+
+  <ResponseField name="returns" type="Template">
+    An independent copy of this template.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="update_vol" type="method">
+  Modify a template's keyword arguments in-place. Changes made here are **not** propagated to clones.
+
+  <ParamField path="**new_arguments" type="Any" required>
+    Keyword arguments to merge into the template's `vol` mapping.
+  </ParamField>
+</ParamField>
+
+<ParamField path="has_member" type="method">
+  Test whether the template contains a member with the given name.
+
+  <ParamField path="member_name" type="str" required>
+    Name of the member to check.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool">
+    `True` if the member exists in this template; `False` otherwise.
+  </ResponseField>
+</ParamField>
+
+## ObjectInterface
+
+Every concrete object class in Volatility 3 ultimately inherits from `ObjectInterface`. Its constructor accepts a `context`, a `type_name`, and an `ObjectInformation` dataclass.
+
+### The `vol` property
+
+Every object exposes a `.vol` attribute — a read-only `ReadOnlyMapping` that carries instance-level metadata. Common keys:
+
+<ResponseField name="vol.offset" type="int">
+  The (normalised) address at which this object was constructed.
+</ResponseField>
+
+<ResponseField name="vol.layer_name" type="str">
+  The name of the layer on which this object lives.
+</ResponseField>
+
+<ResponseField name="vol.native_layer_name" type="str">
+  The layer to use when following pointers contained in this object (may differ from `layer_name` for objects inside mapped files).
+</ResponseField>
+
+<ResponseField name="vol.type_name" type="str">
+  Fully qualified type name including the symbol table, e.g. `nt_symbols!_EPROCESS`.
+</ResponseField>
+
+<ResponseField name="vol.member_name" type="str | None">
+  If this object is a struct member, the name of that member within its parent.
+</ResponseField>
+
+<ResponseField name="vol.parent" type="ObjectInterface | None">
+  The parent object, if this object was accessed as a member of another object.
+</ResponseField>
+
+### Core methods
+
+<ParamField path="cast" type="method">
+  Reinterpret the object at its current offset as a different type.
+
+  <ParamField path="new_type_name" type="str" required>
+    The target type name. If it does not include a `!` table qualifier, the current object's symbol table is used.
+  </ParamField>
+  <ParamField path="**additional" type="Any">
+    Extra keyword arguments forwarded to `update_vol` on the new template.
+  </ParamField>
+
+  <ResponseField name="returns" type="ObjectInterface">
+    A new object at the same offset and layer, interpreted as `new_type_name`.
+  </ResponseField>
+</ParamField>
+
+<ParamField path="get_symbol_table_name" type="method">
+  Extract the symbol table name from this object's `type_name`.
+
+  <ResponseField name="returns" type="str">
+    The table portion of `vol.type_name` (everything before the `!`).
+  </ResponseField>
+</ParamField>
+
+<ParamField path="has_member" type="method">
+  Return whether the object's type definition includes a member with the given name.
+
+  <ParamField path="member_name" type="str" required>
+    Name to look up.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool" />
+</ParamField>
+
+<ParamField path="has_valid_member" type="method">
+  Return whether a member exists **and** can be accessed without raising an exception.
+
+  <ParamField path="member_name" type="str" required>
+    Name to test.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool" />
+</ParamField>
+
+<ParamField path="has_valid_members" type="method">
+  Return whether every name in a list refers to a valid, accessible member.
+
+  <ParamField path="member_names" type="list[str]" required>
+    Names to test.
+  </ParamField>
+
+  <ResponseField name="returns" type="bool" />
+</ParamField>
+
+<ParamField path="write" type="method">
+  Write a new value back to the layer at the object's offset.
+
+  <ParamField path="value" type="Any" required>
+    The new value (must be compatible with the object's type).
+  </ParamField>
+</ParamField>
+
+## Native types
+
+Volatility 3 maps C primitive types to Python classes that inherit from both `ObjectInterface` and the corresponding Python built-in. This means you can use them directly in arithmetic or string operations.
+
+| Volatility class | Python base | Notes |
+|---|---|---|
+| `Integer` | `int` | Signed and unsigned integers |
+| `Boolean` | `int` | Internally an int because Python's `bool` cannot be subclassed |
+| `Float` | `float` | 32-bit and 64-bit floating-point |
+| `Char` | `int` | Single character stored as int |
+| `Bytes` | `bytes` | Fixed-length byte arrays |
+| `String` | `str` | Null-terminated strings; accepts `encoding` and `errors` parameters |
+| `Pointer` | `int` | Pointer value; dereference with `.dereference()` |
+
+### Pointer dereferencing
+
+```python
+eproc = context.object("nt_symbols!_EPROCESS", layer_name="kernel", offset=addr)
+
+# Follow a pointer member
+token_ptr = eproc.Token.Object  # returns a Pointer (an int subclass)
+token = token_ptr.dereference()  # reads the object at the pointed-to address
+```
+
+## Struct member access
+
+Members of a structure are accessed as Python attributes:
+
+```python
+# Windows-style CamelCase
+pid = eproc.UniqueProcessId
+name = eproc.ImageFileName
+
+# Linux/macOS snake_case convention
+task = context.object("vmlinux!task_struct", layer_name="kernel", offset=addr)
+comm = task.comm
+```
+
+<Tip>
+Member names follow the conventions of the operating system's debug symbols. Windows symbols use CamelCase; Linux and macOS symbols use snake_case. Check the ISF file or the running kernel's DWARF data to confirm exact names.
+</Tip>
+
+## Extension methods (`get_` prefix)
+
+Volatility 3 adds utility methods to many object classes. These methods are **always** prefixed with `get_` to avoid collisions with real struct member names:
+
+```python
+# Get the symbol table name of the object
+table = eproc.get_symbol_table_name()  # e.g. "nt_symbols"
+
+# OS extension examples (volatility3.framework.symbols.windows.extensions)
+process_name = eproc.get_string(eproc.ImageFileName)  # decode a fixed-length byte field as a string
+token = eproc.Token.get_token()                       # dereference and clean-tag a pointer
+
+# Linux extension examples
+cmdline = task.get_cmdline()   # decode the process command line
+```
+
+Extension methods are defined per-OS in:
+
+- `volatility3.framework.symbols.windows.extensions`
+- `volatility3.framework.symbols.linux.extensions`
+- `volatility3.framework.symbols.mac.extensions`
+
+## Reading objects from a context
+
+The primary entry point for constructing objects is `context.object()`:
+
+```python
+eproc = context.object(
+    type_name="nt_symbols!_EPROCESS",
+    layer_name="kernel",
+    offset=0xffff8001deadbeef,
+)
+```
+
+<ParamField path="context.object" type="method">
+  Construct an object at a given offset on a given layer.
+
+  <ParamField path="type_name" type="str" required>
+    Fully qualified type name using the `table!type` convention.
+  </ParamField>
+  <ParamField path="layer_name" type="str" required>
+    The name of the layer in `context.layers` to read from.
+  </ParamField>
+  <ParamField path="offset" type="int" required>
+    The address within the layer at which to construct the object.
+  </ParamField>
+  <ParamField path="native_layer_name" type="str">
+    Layer to use when following pointers. Defaults to `layer_name`.
+  </ParamField>
+
+  <ResponseField name="returns" type="ObjectInterface">
+    The newly constructed object with its data read from the layer.
+  </ResponseField>
+</ParamField>
+
+## ObjectInformation dataclass
+
+`ObjectInformation` groups the per-instance data that every object needs:
+
+<ResponseField name="layer_name" type="str">
+  The layer the object was read from.
+</ResponseField>
+
+<ResponseField name="offset" type="int">
+  Address within `layer_name` at which the object starts.
+</ResponseField>
+
+<ResponseField name="native_layer_name" type="str">
+  The layer used when following pointers (may differ from `layer_name`).
+</ResponseField>
+
+<ResponseField name="member_name" type="str | None">
+  Set when the object is a member of a parent struct.
+</ResponseField>
+
+<ResponseField name="parent" type="ObjectInterface | None">
+  The enclosing object, when this object is a struct member.
+</ResponseField>
+
+<ResponseField name="size" type="int | None">
+  Cached size of the object; populated from the template.
+</ResponseField>
+
+## Exception handling
+
+<ResponseField name="InvalidAddressException" type="exception">
+  Raised when an object cannot be constructed because its memory range is unreadable. Defined in `volatility3.framework.exceptions`. Catch this when iterating linked lists or walking potentially corrupt structures.
+</ResponseField>
+
+```python
+from volatility3.framework import exceptions
+
+try:
+    obj = context.object("nt_symbols!_EPROCESS", layer_name="kernel", offset=ptr)
+except exceptions.InvalidAddressException:
+    # Memory at this address is paged out or invalid
+    pass
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Layers API" icon="layer-group" href="/developers/layers-api">
+    Understand how memory layers provide the bytes that objects are constructed from.
+  </Card>
+  <Card title="Symbols API" icon="tag" href="/developers/symbols-api">
+    Learn how symbol tables define the types that objects are constructed against.
+  </Card>
+</CardGroup>

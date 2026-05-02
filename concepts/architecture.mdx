@@ -1,0 +1,157 @@
+---
+title: "Volatility 3 Framework Architecture"
+description: "An overview of how Volatility 3's core components — context, memory layers, symbol tables, plugins, automagic, and renderers — fit together."
+---
+
+Volatility 3 is a memory forensics framework built around a small set of composable components. This page covers how each component is defined, what responsibility it owns, and how data flows from a raw memory image through to rendered output.
+
+## Core components
+
+Volatility 3 splits memory analysis into six distinct layers of responsibility.
+
+<AccordionGroup>
+  <Accordion title="Context" icon="box" defaultOpen={false}>
+    The `Context` is the single container that holds all state for an analysis session. It owns two collections:
+
+    - **`context.layers`** — a `LayerContainer` mapping names to `DataLayerInterface` objects
+    - **`context.symbol_space`** — a `SymbolSpaceInterface` holding all loaded symbol tables
+
+    Every plugin, automagic, and layer receives the same context object so that components share state without direct coupling. The context also exposes a hierarchical **configuration tree** (`context.config`) that components use to declare and receive their options.
+
+    <Note>You can call `context.clone()` to obtain a deep copy of the context. Automagics use this to stage speculative layer-stacking without polluting the original context.</Note>
+  </Accordion>
+
+  <Accordion title="Memory layers" icon="layer-group" defaultOpen={false}>
+    A memory layer is a named, addressable body of data. Layers form a **directed acyclic graph** (DAG): leaf nodes are `DataLayer` objects that read raw bytes from a file or device; internal nodes are `TranslationLayer` objects that translate addresses from a higher address space into a lower one before delegating reads.
+
+    This graph model means Volatility 3 can combine a LiME image, a page file, and a VMware snapshot into a single coherent virtual address space by stacking layers.
+
+    See [Memory Layers](/concepts/memory-layers) for the full reference.
+  </Accordion>
+
+  <Accordion title="Symbol tables" icon="table" defaultOpen={false}>
+    Symbol tables provide structural descriptions of memory: what types exist, how large they are, where their members live, and what named addresses (symbols) the kernel exports.
+
+    Volatility 3 stores symbol tables in the **Intermediate Symbol Format (ISF)** — a JSON schema that serves as a common intermediary between Windows PDB files, Linux DWARF debug info, and macOS symbol data.
+
+    A `SymbolSpace` (held by the context) contains one or more `SymbolTable` objects and supports the `module!symbol` naming convention to avoid collisions across tables.
+
+    See [Symbol Tables](/concepts/symbol-tables) for the full reference.
+  </Accordion>
+
+  <Accordion title="Plugins" icon="puzzle-piece" defaultOpen={false}>
+    A plugin is the analysis algorithm. It declares the layers and symbols it needs through **requirements**, receives a populated context, runs its logic, and returns a `TreeGrid` — a structured table of typed rows.
+
+    Plugins do not render output themselves. They produce a `TreeGrid` and hand it to a renderer. This separation means the same plugin works in a CLI, a web API, or an embedded library without modification.
+
+    Plugins can also emit file artifacts (extracted binaries, dumps, etc.) through the **`FileHandlerInterface`**, which the calling UI registers before plugin execution.
+  </Accordion>
+
+  <Accordion title="Automagic" icon="wand-magic-sparkles" defaultOpen={false}>
+    Automagics run before a plugin and automatically configure the context — detecting the memory image format, stacking translation layers, locating the kernel's page table base, and loading the correct symbol table.
+
+    Without automagics, a caller must build the context manually. The CLI always runs the full automagic suite; library consumers can choose which automagics to run or skip them entirely.
+
+    See [Automagic](/concepts/automagic) for the full reference.
+  </Accordion>
+
+  <Accordion title="Renderers" icon="table-columns" defaultOpen={false}>
+    Renderers consume the `TreeGrid` returned by a plugin and present it to the user. The CLI ships with renderers for:
+
+    - Plain text (formatted table)
+    - JSON
+    - CSV
+    - SQLite database
+
+    A renderer only needs to handle a small set of primitive types — booleans, strings, integers, bytes, disassembly output, and absence values — so it is straightforward to add new output formats.
+  </Accordion>
+</AccordionGroup>
+
+## Data flow
+
+A complete Volatility 3 analysis session follows this path:
+
+```text
+Memory image file
+      │
+      ▼
+ DataLayer (raw file bytes, e.g. LiME, VMware, ELF)
+      │
+      ▼
+ TranslationLayer (e.g. Intel page-table translation)
+      │
+      ▼
+ Context  (layers + symbol space + config tree)
+      │
+      ▼
+ Plugin.run()  →  TreeGrid
+      │
+      ▼
+ Renderer  →  text / JSON / CSV / SQLite
+```
+
+<Steps>
+  <Step title="Image ingested as a DataLayer">
+    The raw file is opened as a `FileLayer` (a `DataLayer`) and registered in `context.layers`. If automagic is enabled, the `LayerStacker` examines the file and wraps it in the appropriate format layer (LiME, VMware, AVML, crash dump, ELF core, etc.).
+  </Step>
+  <Step title="Translation layers stacked">
+    OS-specific automagics locate the kernel's directory table base (DTB) or equivalent and construct a `TranslationLayer` (e.g. `Intel32e`) on top of the physical layer. Process layers can then be stacked on top of the kernel layer as needed.
+  </Step>
+  <Step title="Symbol tables loaded">
+    The automagic for the target OS resolves the correct ISF file from `volatility3/symbols/` (or the user's cache at `~/.cache/volatility3`) and adds it to `context.symbol_space`.
+  </Step>
+  <Step title="Plugin runs">
+    The plugin reads from layers via `layer.read()` or `layer.mapping()`, constructs typed objects from symbol templates, and yields rows into a `TreeGrid`.
+  </Step>
+  <Step title="Renderer presents output">
+    The caller passes the `TreeGrid` to a renderer that formats and writes the results.
+  </Step>
+</Steps>
+
+## Configuration tree
+
+Every configurable component — plugins, layers, automagics — declares its options as `RequirementInterface` objects returned by `get_requirements()`. These requirements form a tree rooted at the plugin.
+
+The configuration tree stored in `context.config` is a hierarchical dictionary. Keys use dot-separated paths (e.g. `plugins.PsList.primary`). Automagics populate entries in this tree before the plugin runs, so the plugin's constructor finds all its requirements satisfied.
+
+```python
+# Retrieve a config value inside a plugin
+layer_name = self.config["primary"]
+
+# Declare a requirement (in get_requirements)
+requirements.TranslationLayerRequirement(name="primary", description="Kernel layer")
+```
+
+## FileHandler interface
+
+Plugins that extract files from memory (process dumps, registry hives, etc.) write through the `FileHandlerInterface`. The calling UI registers a concrete file handler class with the plugin before execution:
+
+```python
+plugin.set_open_method(MyFileHandler)
+```
+
+Inside the plugin, file output works like a standard Python context manager:
+
+```python
+with self.open("extracted_file.exe") as fh:
+    fh.write(raw_bytes)
+```
+
+The handler implementation decides where to save the file — to disk, memory, or a database — without the plugin needing to know.
+
+## Explore further
+
+<CardGroup cols={2}>
+  <Card title="Memory layers" icon="layer-group" href="/concepts/memory-layers">
+    How DataLayers and TranslationLayers form a directed graph over raw memory.
+  </Card>
+  <Card title="Symbol tables" icon="table" href="/concepts/symbol-tables">
+    The ISF format, SymbolSpace, templates, and objects.
+  </Card>
+  <Card title="Automagic" icon="wand-magic-sparkles" href="/concepts/automagic">
+    How automagic automatically stacks layers and resolves symbols.
+  </Card>
+  <Card title="Writing plugins" icon="puzzle-piece" href="/developers/plugin-basics">
+    Build your own analysis plugin using the framework.
+  </Card>
+</CardGroup>

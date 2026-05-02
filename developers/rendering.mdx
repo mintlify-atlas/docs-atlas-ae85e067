@@ -1,0 +1,301 @@
+---
+title: "Rendering TreeGrid Output"
+description: "Understand the TreeGrid structure returned by every Volatility 3 plugin and learn how to consume it with built-in renderers or custom visitor functions."
+---
+
+Every Volatility 3 plugin returns a `TreeGrid` from its `run()` method. This page explains what a `TreeGrid` is, how to traverse it with visitor functions, what column types and format hints plugins use, how absent values are represented, and how to use the built-in CLI renderers or write your own.
+
+## What is a TreeGrid?
+
+A `TreeGrid` is the single structured output format used by every plugin in the Volatility 3 framework. It represents tabular data arranged in a tree — rows can be children of other rows, modelling hierarchical relationships such as process trees.
+
+A `TreeGrid` has two main components:
+
+- **Columns** — a list of `(name, type)` pairs that describe the schema.
+- **Rows** — each row is a `TreeNode` carrying a tuple of values corresponding to the columns, plus a `path_depth` integer that encodes its position in the tree hierarchy.
+
+The `TreeGrid` itself **does not contain data when first returned** from `run()`. It wraps a generator, and actual plugin execution happens during the `populate()` call.
+
+### Tree structure
+
+Hierarchy is encoded via `path_depth`:
+
+| `path_depth` | Meaning                          |
+|:------------:|----------------------------------|
+| 1            | Top-level row (no parent)        |
+| 2            | Child of the most recent depth-1 row |
+| 3            | Grandchild, and so on            |
+
+When rendering, the convention is to prefix each row with `*` characters equal to `max(0, node.path_depth - 1)` to visually represent nesting depth.
+
+## Column types
+
+Each column has a `type` attribute that declares what Python type its values hold. The supported base types are:
+
+| Type               | Notes                                            |
+|--------------------|--------------------------------------------------|
+| `int`              | Signed or unsigned integer                       |
+| `str`              | Unicode string                                   |
+| `bytes`            | Raw byte string                                  |
+| `float`            | Floating-point number                            |
+| `bool`             | Boolean                                          |
+| `datetime.datetime`| UTC-aware or naive datetime object               |
+
+Columns can also use subclasses of these types (see format hints below) or `BasicType` subclasses such as `renderers.Disassembly`.
+
+## Format hints
+
+A plugin may use a subclass of a base type to signal how a renderer should display a value. These format hints live in `volatility3.framework.renderers.format_hints`:
+
+| Hint class        | Base type | Rendering intent                                          |
+|-------------------|-----------|-----------------------------------------------------------|
+| `format_hints.Hex`      | `int`     | Display as hexadecimal: `0x7ffe0000`                |
+| `format_hints.Bin`      | `int`     | Display as binary: `0b1010`                         |
+| `format_hints.HexBytes` | `bytes`   | Display as hex dump with ASCII sidebar               |
+| `format_hints.MultiTypeData` | `bytes` | String data that may contain binary; decoded where possible |
+
+Renderers check the column's type against the hint classes and apply the appropriate formatting. If no hint is registered for a type, the renderer falls back to `str(value)`.
+
+```python
+from volatility3.framework.renderers import format_hints
+
+# A plugin might declare a column as:
+columns = [
+    ("Offset", format_hints.Hex),
+    ("Name", str),
+    ("Flags", format_hints.Bin),
+]
+```
+
+## Absent values
+
+When a plugin cannot retrieve a value from memory, it uses a subclass of `BaseAbsentValue` instead of raising an exception. There are four variants, all importable from `volatility3.framework.renderers`:
+
+<CardGroup cols={2}>
+  <Card title="UnreadableValue" icon="eye-slash">
+    The data exists at the expected location but could not be read from memory (e.g. a page fault or inaccessible region).
+  </Card>
+  <Card title="UnparsableValue" icon="triangle-exclamation">
+    The data was read but could not be interpreted as the expected type (e.g. a corrupted structure).
+  </Card>
+  <Card title="NotApplicableValue" icon="ban">
+    The field is not meaningful for this particular row (e.g. a Linux-only field on a Windows result).
+  </Card>
+  <Card title="NotAvailableValue" icon="clock">
+    The value could be applicable but is not available in this run — typically because required symbol information is missing.
+  </Card>
+</CardGroup>
+
+When consuming values in a visitor, check for absent values before attempting to use a value as its declared type:
+
+```python
+from volatility3.framework.interfaces import renderers as irenderers
+
+def visitor(node, accumulator):
+    for column_index, column in enumerate(grid.columns):
+        value = node.values[column_index]
+        if isinstance(value, irenderers.BaseAbsentValue):
+            print("-", end="\t")
+        else:
+            print(value, end="\t")
+    print()
+    return accumulator
+```
+
+## Populating a TreeGrid
+
+Call `populate()` to drive the plugin's generator and collect results. Pass a visitor function and an initial accumulator:
+
+```python
+result = grid.populate(visitor, initial_accumulator, fail_on_errors=True)
+```
+
+| Parameter           | Type       | Description                                                              |
+|---------------------|------------|--------------------------------------------------------------------------|
+| `function`          | callable   | Visitor called once per node: `(TreeNode, accumulator) -> accumulator`.  |
+| `initial_accumulator` | any      | Starting value for the accumulator passed through all visitor calls.     |
+| `fail_on_errors`    | bool       | If `True`, exceptions in the generator propagate. If `False`, they are caught and returned. |
+
+`populate()` returns `None` on success, or the caught exception when `fail_on_errors=False`.
+
+If the grid has already been populated, use `visit()` instead to traverse the stored tree without re-running the generator:
+
+```python
+grid.visit(node=None, function=visitor, initial_accumulator=None)
+```
+
+## Writing a visitor function
+
+A visitor is any callable with the signature `(node: TreeNode, accumulator: T) -> T`. It is called for every node in depth-first order and must return the (possibly modified) accumulator.
+
+The following example produces a simple text table without using an accumulator:
+
+```python
+for column in grid.columns:
+    print(column.name, end="\t")
+print()
+
+def visitor(node, _accumulator):
+    # Nodes always have a path_depth of at least 1
+    print("*" * max(0, node.path_depth - 1), end=" ")
+    for column_index in range(len(grid.columns)):
+        print(repr(node.values[column_index]), end="\t")
+    print()
+    return None
+
+grid.populate(visitor, None)
+```
+
+To collect all rows into a list instead of printing immediately:
+
+```python
+rows = []
+
+def collecting_visitor(node, accumulator):
+    accumulator.append({
+        col.name: node.values[i]
+        for i, col in enumerate(grid.columns)
+    })
+    return accumulator
+
+grid.populate(collecting_visitor, rows)
+# rows now contains one dict per node
+```
+
+## Built-in CLI renderers
+
+The `volatility3.cli.text_renderer` module provides several ready-made renderers. Each implements the `Renderer` interface: construct it with optional options, then call `render(grid)`.
+
+<Tabs>
+  <Tab title="QuickTextRenderer">
+    Tab-separated output written directly to `stdout` as rows are visited. Suitable for fast preview or piping to other tools.
+
+    ```python
+    from volatility3.cli.text_renderer import QuickTextRenderer
+
+    renderer = QuickTextRenderer()
+    renderer.render(grid)
+    ```
+
+    Output format (tab-separated, indentation via leading `*` characters):
+
+    ```
+    PID    PPID   ImageFileName   Offset(V)   Threads
+    4      0      System          0xfa8...    100
+    * 88   4      smss.exe        0xfa8...    2
+    ```
+  </Tab>
+
+  <Tab title="PrettyTextRenderer">
+    Columnar output with dynamic column widths. Buffers all rows before printing, so `stderr` shows `"Formatting..."` while results are collected.
+
+    ```python
+    from volatility3.cli.text_renderer import PrettyTextRenderer
+
+    renderer = PrettyTextRenderer()
+    renderer.render(grid)
+    ```
+  </Tab>
+
+  <Tab title="JsonRenderer">
+    Structured JSON output. Rows become a list of objects; child rows nest under a `__children` key. Useful for programmatic consumption.
+
+    ```python
+    from volatility3.cli.text_renderer import JsonRenderer
+
+    renderer = JsonRenderer()
+    renderer.render(grid)
+    ```
+
+    Example output structure:
+
+    ```json
+    [
+      {
+        "PID": 4,
+        "ImageFileName": "System",
+        "__children": [
+          {
+            "PID": 88,
+            "ImageFileName": "smss.exe",
+            "__children": []
+          }
+        ]
+      }
+    ]
+    ```
+  </Tab>
+
+  <Tab title="CSVRenderer">
+    CSV output with a `TreeDepth` column prepended. Each row is written immediately to `stdout`.
+
+    ```python
+    from volatility3.cli.text_renderer import CSVRenderer
+
+    renderer = CSVRenderer()
+    renderer.render(grid)
+    ```
+
+    Example output:
+
+    ```
+    TreeDepth,PID,PPID,ImageFileName
+    0,4,0,System
+    1,88,4,smss.exe
+    ```
+  </Tab>
+</Tabs>
+
+## Selecting a renderer from the CLI
+
+When using the `vol` command, select an output format with `--output`:
+
+```bash
+# Tab-separated text (default)
+vol -f memory.raw windows.pslist
+
+# Pretty-printed columns
+vol -f memory.raw --output=pretty windows.pslist
+
+# JSON
+vol -f memory.raw --output=json windows.pslist
+
+# CSV
+vol -f memory.raw --output=csv windows.pslist
+```
+
+The available renderer names are: `quick` (default), `pretty`, `json`, `jsonl`, `csv`, and `none`.
+
+## SQLite output
+
+Volatility 3 also supports writing results to an SQLite database using the `--output-dir` and `--output=json` flags in combination with external tooling. For database-backed workflows, consider consuming the `TreeGrid` programmatically with a `collecting_visitor` (shown above) and inserting rows into your own schema.
+
+## Type renderer dispatch
+
+The built-in renderers map column types to formatting functions using a `_type_renderers` dictionary. To customise how a specific type is displayed, subclass `CLIRenderer` and override the dictionary:
+
+```python
+from volatility3.cli.text_renderer import CLIRenderer
+from volatility3.framework.renderers import format_hints
+
+class MyRenderer(CLIRenderer):
+    _type_renderers = {
+        **CLIRenderer._type_renderers,
+        # Display hex integers as uppercase
+        format_hints.Hex: lambda x: f"0x{x:X}",
+    }
+
+    name = "myrenderer"
+    structured_output = False
+
+    def get_render_options(self):
+        return []
+
+    def render(self, grid):
+        # Implement your rendering logic here
+        pass
+```
+
+<Tip>
+  For more complex renderer examples, read the source of `QuickTextRenderer` and `PrettyTextRenderer` in `volatility3/cli/text_renderer.py` — both are compact, well-structured examples of the visitor pattern applied to the `TreeGrid`.
+</Tip>

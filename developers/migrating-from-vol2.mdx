@@ -1,0 +1,310 @@
+---
+title: "Migrating Your Volatility 2 Plugins to Volatility 3"
+description: "A complete guide to the architectural and API differences between Volatility 2 and 3, with side-by-side code examples for plugin authors."
+---
+
+Volatility 3 is a ground-up rewrite of Volatility 2, introducing a fundamentally different architecture designed to work as a proper Python library. This page covers every major change plugin authors encounter when porting existing Volatility 2 plugins to Volatility 3, with code examples showing both the old and new approach side by side.
+
+## Library and context
+
+Volatility 2 maintained global state across runs. Volatility 3 is designed from the start as an embeddable library: all state required to run a plugin at a given moment lives inside a `ContextInterface` object. A context holds two things — the available translation layers and the available symbol tables. Because state is self-contained, multiple contexts can coexist in the same process with no interference.
+
+<Tabs>
+  <Tab title="Volatility 2">
+    ```python
+    # Volatility 2: config object accessed through module-level globals
+    import volatility.conf as conf
+    import volatility.registry as registry
+
+    config = conf.ConfObject()
+    registry.PluginImporter()
+    config.parse_options()
+    config.PROFILE = "WinXPSP2x86"
+    config.LOCATION = "file:///path/to/memory.img"
+    ```
+  </Tab>
+  <Tab title="Volatility 3">
+    ```python
+    # Volatility 3: all state lives in a context object
+    from volatility3.framework import contexts, automagic, plugins
+
+    ctx = contexts.Context()
+    # Automagic populates ctx with the correct layers and symbol tables
+    constructed = plugins.construct_plugin(
+        ctx,
+        automagic.available(ctx),
+        plugin_class,
+        base_config_path="plugins",
+        progress_callback=None,
+        open_method=None,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## No more profiles
+
+Volatility 2 required you to select a **profile** (e.g., `Win7SP1x64`) that bundled type definitions, constants, and virtual-to-physical translation logic together. Profiles were static, ship-with-the-tool blobs that broke whenever a minor kernel update shifted struct layouts.
+
+Volatility 3 replaces profiles with **symbol tables**: Intermediate Symbol Format (ISF) JSON files that describe the data structures of a specific kernel build. For Windows, Volatility 3 generates ISF files automatically from Microsoft's public PDB symbol server. For Linux and macOS, you generate them from the running kernel using [dwarf2json](https://github.com/volatilityfoundation/dwarf2json).
+
+| Volatility 2 | Volatility 3 |
+|---|---|
+| Monolithic profile (types + layer logic combined) | Separate symbol table (ISF JSON) and layer stacker |
+| Must manually select the correct profile | Automagic detects and loads the right symbol table |
+| Profile updates distributed as part of Volatility | Symbol tables generated from live kernel debug info |
+| Windows-only auto-detection via `imageinfo` | Automatic for Windows; manual generation for Linux/macOS |
+
+## Object model
+
+In Volatility 2, memory objects were proxy wrappers. They tried to emulate native Python types, but because they were a different underlying class, subtle operation-order bugs were common (`x + y` could fail while `y + x` succeeded for the same values).
+
+In Volatility 3, objects directly inherit from their Python counterparts. An integer in memory **is** a Python `int` and behaves identically everywhere a `int` is expected.
+
+<Tabs>
+  <Tab title="Volatility 2">
+    ```python
+    # V2: proxy object — not a real int; ordering can matter
+    eproc = addr_space.read(offset, ...)
+    pid = eproc.UniqueProcessId   # custom proxy type
+    if pid == 4:                  # works, but pid is not int
+        pass
+    ```
+  </Tab>
+  <Tab title="Volatility 3">
+    ```python
+    # V3: genuine Python int — all normal operations work
+    eproc = ctx.object(
+        "nt_symbols!_EPROCESS",
+        layer_name=layer_name,
+        offset=offset,
+    )
+    pid = eproc.UniqueProcessId   # actual Python int
+    if pid == 4:                  # works as expected
+        pass
+    ```
+  </Tab>
+</Tabs>
+
+### Performance: data read once at construction
+
+Volatility 2 re-read memory on every attribute access to support live memory analysis. In practice, live analysis was rarely used, and repeated re-reads through page table walks were expensive.
+
+Volatility 3 reads data once at construction time. The value is static for the lifetime of the object. This eliminates redundant page-table traversals and makes object access significantly faster.
+
+### Object metadata via `obj.vol`
+
+Volatility 2 reserved certain attribute names (like `.v()`, `.obj_offset`) on every object. Any kernel struct that happened to use those names caused collisions.
+
+Volatility 3 moves all framework metadata to a read-only `.vol` dict on every object, so struct members can have any name without conflict.
+
+<Tabs>
+  <Tab title="Volatility 2">
+    ```python
+    # V2: special methods mixed into the object namespace
+    offset = obj.obj_offset
+    layer  = obj.obj_vm
+    value  = obj.v()
+    ```
+  </Tab>
+  <Tab title="Volatility 3">
+    ```python
+    # V3: metadata isolated in obj.vol
+    offset = obj.vol.offset
+    layer  = obj.vol.layer_name
+    # The object value is accessed directly (it IS the native type)
+    ```
+  </Tab>
+</Tabs>
+
+## Templates vs. objects
+
+Volatility 2 blurred the line between a type descriptor and a constructed object. Determining the size of a type often required instantiating it against a dummy buffer.
+
+Volatility 3 makes the distinction explicit:
+
+- A **Template** (`ObjectTemplate`) describes a type — its size, members, and how to construct an instance. You can query a template's size without ever reading memory.
+- An **Object** is a template bound to a specific layer and offset. Only then does memory get read.
+
+```python
+# V3: query template size without constructing an object
+template = ctx.symbol_space.get_type("nt_symbols!_EPROCESS")
+print(template.size)  # no memory read performed
+```
+
+## Layers: directed graph, not a stack
+
+Volatility 2 used **address spaces** arranged in a strict linear stack: one address space on top of exactly one other. This prevented modelling swap files, which exist alongside — not above — physical memory.
+
+Volatility 3 uses **translation layers** arranged as a directed acyclic graph. A layer can have multiple lower-level dependencies. This enables swap-space integration and other multi-source layouts without hacks.
+
+| Volatility 2 address spaces | Volatility 3 translation layers |
+|---|---|
+| Linear stack only | Directed acyclic graph |
+| Single dependency per layer | Multiple dependencies per layer |
+| Swap space unsupported natively | Swap layers supported as peer dependencies |
+| Instantiated by profile | Discovered and stacked by automagic |
+
+## Plugin system
+
+Volatility 2 plugins subclassed `commands.Command` and accessed configuration through `self._config`. Volatility 3 plugins subclass `PluginInterface` and declare their requirements explicitly.
+
+<Tabs>
+  <Tab title="Volatility 2">
+    ```python
+    import volatility.commands as commands
+    import volatility.utils as utils
+
+    class PsList(commands.Command):
+        """List processes"""
+
+        def calculate(self):
+            addr_space = utils.load_as(self._config)
+            for task in tasks.pslist(addr_space):
+                yield task
+
+        def render_text(self, outfd, data):
+            for task in data:
+                outfd.write(f"{task.UniqueProcessId}\n")
+    ```
+  </Tab>
+  <Tab title="Volatility 3">
+    ```python
+    from volatility3.framework import interfaces, renderers
+    from volatility3.framework.configuration import requirements
+
+    class PsList(interfaces.plugins.PluginInterface):
+        """List processes."""
+
+        _required_framework_version = (2, 0, 0)
+        _version = (1, 0, 0)
+
+        @classmethod
+        def get_requirements(cls):
+            return [
+                requirements.ModuleRequirement(
+                    name="kernel",
+                    description="Windows kernel module",
+                    architectures=["Intel32", "Intel64"],
+                ),
+            ]
+
+        def run(self):
+            kernel = self.context.modules[
+                self.config["kernel"]
+            ]
+            return renderers.TreeGrid(
+                [("PID", int), ("Name", str)],
+                self._generator(kernel),
+            )
+
+        def _generator(self, kernel):
+            for proc in kernel.object_from_symbol(
+                symbol_name="PsActiveProcessHead",
+                type_name="_LIST_ENTRY",
+            ):
+                yield (0, [
+                    int(proc.UniqueProcessId),
+                    proc.ImageFileName.cast("string", max_length=15),
+                ])
+    ```
+  </Tab>
+</Tabs>
+
+### `_required_framework_version`
+
+Every plugin declares `_required_framework_version` as a `(major, minor, patch)` tuple. Volatility checks this against the running framework version at load time and refuses to run the plugin if the major version does not match. This protects against silently broken plugins after breaking API changes.
+
+### `_version`
+
+Plugins also declare their own `_version` tuple using the same `(major, minor, patch)` SemVer convention. When another plugin depends on yours as a library (via a `PluginRequirement`), it can specify a minimum version, and Volatility will reject the run if the installed version is incompatible.
+
+## Configuration system
+
+Volatility 2 used a flat key-value `ConfObject`. Volatility 3 uses a hierarchical configuration tree. Each component (layer, symbol table, plugin) owns its own config subtree identified by a dotted path prefix.
+
+<Tabs>
+  <Tab title="Volatility 2">
+    ```python
+    # V2: flat global config
+    config.PROFILE = "Win7SP1x64"
+    config.LOCATION = "file:///memory.raw"
+    config.PID = 4
+    ```
+  </Tab>
+  <Tab title="Volatility 3">
+    ```python
+    # V3: hierarchical config tree
+    ctx.config["plugins.PsList.kernel"] = "kernel"
+    ctx.config["automagic.LayerStacker.single_location"] = (
+        "file:///memory.raw"
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Output: TreeGrid replaces unified output
+
+Volatility 2 plugins implemented `render_text`, `render_json`, and similar methods for each output format. Adding a new output format meant updating every plugin.
+
+Volatility 3 plugins return a single `TreeGrid` object. Renderers are separate from plugins and apply to any `TreeGrid` output. The same plugin works with the text table, JSON, CSV, and SQLite renderers without any plugin-side changes.
+
+<Tabs>
+  <Tab title="Volatility 2">
+    ```python
+    def render_text(self, outfd, data):
+        self.table_header(outfd, [("Offset", "[addrpad]"), ("Pid", "8")])
+        for task in data:
+            self.table_row(outfd, task.obj_offset, task.UniqueProcessId)
+    ```
+  </Tab>
+  <Tab title="Volatility 3">
+    ```python
+    def run(self):
+        return renderers.TreeGrid(
+            [("Offset", format_hints.Hex), ("PID", int)],
+            self._generator(),
+        )
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  `TreeGrid` also supports nested rows (indented children), which enables
+  tree-structured output such as process trees — something that required
+  special handling in Volatility 2.
+</Note>
+
+## Automagic
+
+Volatility 2 attempted to hide complexity automatically, but the rules were implicit and non-configurable. Volatility 3 formalises this as the **automagic** subsystem: a set of named, individually enable/disable-able components that each handle one piece of setup (layer stacking, symbol table resolution, kernel base finding, etc.).
+
+By default, Volatility selects automagic based on the plugin requested: Linux plugins get Linux-specific automagic, Windows plugins get Windows-specific automagic. This avoids wasteful searches (e.g., scanning a Windows image for Linux kernel signatures).
+
+## Scanning
+
+The scanning API is largely unchanged in concept. You prime a scanner object with the pattern to search for and call `.scan()` on a layer.
+
+```python
+from volatility3.framework.layers import scanners
+
+for offset in layer.scan(
+    context=ctx,
+    scanner=scanners.BytesScanner(b"\x4d\x5a"),
+):
+    print(f"MZ header at 0x{offset:x}")
+```
+
+## Quick reference table
+
+| Concept | Volatility 2 | Volatility 3 |
+|---|---|---|
+| Entry point | `commands.Command` subclass | `PluginInterface` subclass |
+| State management | Global `ConfObject` | Per-run `ContextInterface` |
+| OS type information | Profiles | ISF symbol tables |
+| Address spaces | Linear stack | Directed-graph layers |
+| Object type | Proxy wrapper | Native Python type |
+| Metadata access | `obj.obj_offset`, `obj.v()` | `obj.vol.offset` |
+| Output format | Per-plugin render methods | `TreeGrid` + separate renderers |
+| Setup automation | Implicit, non-configurable | Named automagic components |
+| Plugin versioning | None | `_version` + `_required_framework_version` |

@@ -1,0 +1,209 @@
+---
+title: "Output Formats and Renderers: Volatility 3 Reference"
+description: "Reference for Volatility 3 output renderers: quick, pretty, json, jsonl, csv, and none. Covers format hints, absent values, filters, and file artifacts."
+---
+
+Every Volatility 3 plugin returns a `TreeGrid` — a structured table with typed columns and optionally nested rows. A renderer converts that `TreeGrid` into human-readable text, structured data, or silence. Understanding the available renderers and how data is typed helps you pipe output into downstream tools or interpret column values correctly.
+
+## Selecting a renderer
+
+Use the `-r` (or `--renderer`) flag to choose a format:
+
+```bash
+vol -f memory.raw -r <renderer> <plugin>
+```
+
+The default renderer is `quick`.
+
+## Available renderers
+
+<Tabs>
+  <Tab title="quick (default)">
+    Streams output to stdout as it is produced, with columns separated by tabs. Column widths are not aligned — each row is printed immediately without waiting for all rows to arrive.
+
+    ```bash
+    vol -f memory.raw windows.pslist
+    # equivalent to:
+    vol -f memory.raw -r quick windows.pslist
+    ```
+
+    Example output:
+
+    ```text
+    PID     PPID    ImageFileName   Offset(V)           Threads ...
+    4       0       System          0x8c0bcac87040      143     ...
+    356     4       smss.exe        0x8c0bccf8d040      3       ...
+    ```
+  </Tab>
+  <Tab title="pretty">
+    Collects all rows before printing, then aligns every column to its maximum width. Output is easier to read but takes longer to appear because the plugin must finish before rendering begins.
+
+    ```bash
+    vol -f memory.raw -r pretty windows.pslist
+    ```
+
+    A `Formatting...` message is written to stderr while rows are gathered.
+  </Tab>
+  <Tab title="json">
+    Outputs a JSON array to stdout. Each row is an object with column names as keys. Nested rows appear inside a `__children` array. The version banner is written to stderr so stdout remains valid JSON.
+
+    ```bash
+    vol -f memory.raw -r json windows.pslist > pslist.json
+    ```
+
+    Example structure:
+
+    ```json
+    [
+      {
+        "PID": 4,
+        "PPID": 0,
+        "ImageFileName": "System",
+        "Offset(V)": "0x8c0bcac87040",
+        "__children": []
+      }
+    ]
+    ```
+  </Tab>
+  <Tab title="jsonl">
+    Outputs one JSON object per line (JSON Lines format). Useful for streaming into log ingestion pipelines. Like `json`, the banner goes to stderr.
+
+    ```bash
+    vol -f memory.raw -r jsonl windows.pslist | jq '.ImageFileName'
+    ```
+  </Tab>
+  <Tab title="csv">
+    Outputs comma-separated values with a header row. A `TreeDepth` column is prepended to represent tree nesting depth. The banner goes to stderr.
+
+    ```bash
+    vol -f memory.raw -r csv windows.pslist > pslist.csv
+    ```
+
+    Example:
+
+    ```text
+    TreeDepth,PID,PPID,ImageFileName,...
+    0,4,0,System,...
+    0,356,4,smss.exe,...
+    ```
+  </Tab>
+  <Tab title="none">
+    Runs the plugin but discards all output. Useful for benchmarking, side-effect-only plugins, or when you only care about files written to `--output-dir`.
+
+    ```bash
+    vol -f memory.raw -r none windows.dumpfiles --pid 1234
+    ```
+  </Tab>
+</Tabs>
+
+## Suppressing progress output
+
+Structured renderers (`json`, `jsonl`, `csv`) redirect the version banner to stderr automatically. To also suppress the progress bar that appears during long-running operations, add `-q`:
+
+```bash
+vol -f memory.raw -q -r json windows.pslist > pslist.json
+```
+
+## Writing file artifacts with --output-dir
+
+Some plugins write files to disk (for example, `windows.dumpfiles` extracts process memory). Use `-o` to specify where those files land:
+
+```bash
+vol -f memory.raw -o /tmp/dumps windows.dumpfiles --pid 1234
+```
+
+The directory must already exist. If two files would have the same name, Volatility appends a counter (`filename-1.ext`, `filename-2.ext`, …).
+
+## Format hints
+
+Plugins annotate integer and byte columns with format hints that tell renderers how to display them. The hints are defined in `volatility3.framework.renderers.format_hints`.
+
+| Hint class | Underlying type | Text renderer output |
+|------------|-----------------|----------------------|
+| `Hex` | `int` | `0x1a2b3c` |
+| `Bin` | `int` | `0b10110100` |
+| `HexBytes` | `bytes` | Side-by-side hex + ASCII dump |
+| `MultiTypeData` | `bytes` | String if valid UTF-16-LE, else hex dump |
+
+In the JSON renderer, `HexBytes` columns are serialized as space-separated hex strings (e.g., `"4d 5a 90 00"`). `Hex` and `Bin` values are rendered as plain integers in JSON so they remain numeric.
+
+## Absent values
+
+When a plugin cannot produce a value for a cell it returns an absent-value object rather than `None`. The text and CSV renderers map these to short strings; the JSON renderer maps them to `null`.
+
+| Class | Text / CSV display | Meaning |
+|-------|--------------------|---------|
+| `UnreadableValue` | `-` | The memory address could not be read. |
+| `UnparsableValue` | `-` | The data was read but could not be interpreted. |
+| `NotApplicableValue` | `N/A` | The field does not apply to this row. |
+| `NotAvailableValue` | `N/A` | The value could apply but is not currently available (e.g., symbol data missing). |
+
+## Filtering output rows
+
+Use `--filters` to include or exclude rows based on column values. Filters are of the form `[+-]columnname,pattern[!]`:
+
+| Prefix | Effect |
+|--------|--------|
+| `+` | Include rows where the column matches the pattern. |
+| `-` | Exclude rows where the column matches the pattern. |
+
+Append `!` to the pattern to negate the match. Multiple `--filters` flags are combined with AND logic.
+
+```bash
+# Show only rows where ImageFileName contains "svchost"
+vol -f memory.raw --filters +ImageFileName,svchost windows.pslist
+
+# Exclude System and Idle processes
+vol -f memory.raw --filters -ImageFileName,System --filters -ImageFileName,Idle windows.pslist
+```
+
+## Hiding columns
+
+Use `--hide-columns` to suppress one or more columns from the output. Matching is case-insensitive prefix matching:
+
+```bash
+# Hide the "Offset" and "File output" columns
+vol -f memory.raw --hide-columns Offset "File output" windows.pslist
+```
+
+This works across all renderers. Attempting to hide all columns raises an error.
+
+## The TreeGrid structure
+
+Plugins produce a `TreeGrid` with:
+
+- **Columns** — typed, named fields defined by the plugin.
+- **Nodes** — rows that may have children (expressed as tree depth). Flat plugins use depth 1 throughout; recursive plugins (e.g., process trees) use deeper nesting.
+
+The `pretty` and `quick` renderers indent child rows with `*` characters. The JSON renderer places children in the `__children` array. The CSV renderer uses the `TreeDepth` column.
+
+## Saving the configuration
+
+After a successful run you can save the full resolved configuration to replay or share it:
+
+```bash
+vol -f memory.raw --save-config run.json windows.pslist
+```
+
+Re-run with the exact same configuration:
+
+```bash
+vol -c run.json windows.pslist
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="vol CLI" icon="terminal" href="/using/cli">
+    Full reference for all global flags, including `-r`, `-o`, `-q`, and `--filters`.
+  </Card>
+  <Card title="Library usage" icon="code" href="/developers/library-usage">
+    Render TreeGrid output programmatically inside your own Python application.
+  </Card>
+  <Card title="Writing plugins" icon="plug" href="/developers/plugin-basics">
+    Learn how plugins produce TreeGrid objects and annotate columns with format hints.
+  </Card>
+  <Card title="Volshell" icon="terminal" href="/using/volshell">
+    Use `render_treegrid` to display plugin output interactively in Volshell.
+  </Card>
+</CardGroup>
